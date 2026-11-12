@@ -19,9 +19,26 @@ $BepInExSha256 = '6c57a714a892efb4e9e1fef63d608a3391f30ec984031c465404e4ee381a07
 function Write-Step($text) { Write-Host "`n$text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host "`n$text" -ForegroundColor Red; exit 1 }
 
-$PluginUrl = 'https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay.dll'
+# One build per YARG channel: YargNetplay-Stable.dll and YargNetplay-Nightly.dll.
+$PluginUrl = 'https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-{0}.dll'
 
 # ------------------------------------------------------------ find YARG
+
+# Stable releases are tagged v1.2.3 and nightlies b1234 (in the launcher's tag.txt).
+function Get-Channel($tag) {
+    if ($tag -match '^v\d') { 'Stable' } elseif ($tag -match '^b\d+') { 'Nightly' } else { $null }
+}
+
+# For a folder picked by hand: the launcher's tag.txt next to it if there is one, otherwise ask.
+function New-Target($folder) {
+    $tagFile = Join-Path (Split-Path $folder -Parent) 'tag.txt'
+    $channel = if (Test-Path $tagFile) { Get-Channel (Get-Content $tagFile -Raw).Trim() } else { $null }
+    while (-not $channel) {
+        $answer = Read-Host "Is $folder YARG Stable or Nightly? (S/N)"
+        if ($answer -match '^[sS]') { $channel = 'Stable' } elseif ($answer -match '^[nN]') { $channel = 'Nightly' }
+    }
+    [pscustomobject]@{ Name = "YARG $channel"; Path = $folder; Channel = $channel }
+}
 
 function Get-YargInstalls {
     # The YARC Launcher keeps each version in "<download location>\YARG Installs\<id>\installation", with the
@@ -43,8 +60,9 @@ function Get-YargInstalls {
         if (Test-Path (Join-Path $folder 'YARG.exe')) {
             $tagFile = Join-Path $_.FullName 'tag.txt'
             $tag = if (Test-Path $tagFile) { (Get-Content $tagFile -Raw).Trim() } else { $_.Name }
-            $kind = if ($tag -match '^b\d+') { 'Nightly' } elseif ($tag -match '^v\d') { 'Stable' } else { 'YARG' }
-            [pscustomobject]@{ Name = "$kind $tag"; Path = $folder }
+            $channel = Get-Channel $tag
+            if ($channel) { [pscustomobject]@{ Name = "$channel $tag"; Path = $folder; Channel = $channel } }
+            else { New-Target $folder }
         }
     }
 }
@@ -59,7 +77,7 @@ function Select-YargFolder {
 
 $targets = @()
 if ($YargPath) {
-    $targets = @([pscustomobject]@{ Name = 'YARG'; Path = $YargPath })
+    $targets = @(New-Target $YargPath)
 } else {
     $found = @(Get-YargInstalls)
     if ($found.Count -eq 1) {
@@ -76,7 +94,7 @@ if ($YargPath) {
         Write-Host 'No YARC Launcher installs of YARG were found. Pick your YARG folder.'
         $picked = Select-YargFolder
         if (-not $picked) { Fail 'No folder picked. Nothing was installed.' }
-        $targets = @([pscustomobject]@{ Name = 'YARG'; Path = $picked })
+        $targets = @(New-Target $picked)
     }
 }
 
@@ -96,20 +114,23 @@ if ($running) {
 
 $ProgressPreference = 'SilentlyContinue' # the progress bar makes Invoke-WebRequest very slow
 
-# ------------------------------------------------------------ the plugin (the newest GitHub release)
+# ------------------------------------------------------------ the plugin (the newest GitHub release, per channel)
 
+$plugins = @{}
+$downloaded = @()
 if ($PluginPath) {
     if (-not (Test-Path $PluginPath)) { Fail "$PluginPath doesn't exist." }
-    $plugin = (Resolve-Path $PluginPath).Path
-    $downloadedPlugin = $false
+    foreach ($t in $targets) { $plugins[$t.Channel] = (Resolve-Path $PluginPath).Path }
 } else {
-    Write-Step 'Downloading the newest YARG Netplay...'
-    $plugin = Join-Path ([IO.Path]::GetTempPath()) 'YargNetplay.dll'
-    try { Invoke-WebRequest -Uri $PluginUrl -OutFile $plugin -UseBasicParsing }
-    catch { Fail "Couldn't download YARG Netplay from GitHub: $($_.Exception.Message)" }
-    $downloadedPlugin = $true
+    foreach ($channel in @($targets | ForEach-Object { $_.Channel } | Select-Object -Unique)) {
+        Write-Step "Downloading the newest YARG Netplay for YARG $channel..."
+        $file = Join-Path ([IO.Path]::GetTempPath()) "YargNetplay-$channel.dll"
+        try { Invoke-WebRequest -Uri ($PluginUrl -f $channel) -OutFile $file -UseBasicParsing }
+        catch { Fail "Couldn't download YARG Netplay from GitHub: $($_.Exception.Message)" }
+        $plugins[$channel] = $file
+        $downloaded += $file
+    }
 }
-$version = (Get-Item $plugin).VersionInfo.ProductVersion -replace '\+.*'
 
 # ------------------------------------------------------------ BepInEx (downloaded once, only if some target lacks it)
 
@@ -145,12 +166,14 @@ foreach ($t in $targets) {
 
     $pluginDir = Join-Path $t.Path 'BepInEx\plugins\YargNetplay'
     New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
+    $plugin = $plugins[$t.Channel]
     Copy-Item $plugin (Join-Path $pluginDir 'YargNetplay.dll') -Force
+    $version = (Get-Item $plugin).VersionInfo.ProductVersion -replace '\+.*'
     Write-Host "  Installed YARG Netplay $version."
 }
 
 if ($zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
-if ($downloadedPlugin) { Remove-Item $plugin -Force -ErrorAction SilentlyContinue }
+foreach ($file in $downloaded) { Remove-Item $file -Force -ErrorAction SilentlyContinue }
 
 Write-Host "`nDone. Start YARG and choose Online in the main menu." -ForegroundColor Green
 Write-Host 'If the YARC Launcher updates or verifies YARG, it may remove BepInEx. Run this installer again if Online disappears.'

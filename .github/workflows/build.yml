@@ -1,26 +1,79 @@
 name: Build
 
+# Builds the mod against the newest YARG stable and nightly, one DLL per channel.
+#  - Pushes and pull requests: build the pushed code.
+#  - v* tags: build and publish a GitHub release (what the installers and the in-game update check use).
+#  - Daily: rebuild the latest release's code against the newest YARG versions. If the DLL changes (a new YARG needed
+#    a rebuild), the release's DLL for that channel is replaced. If it no longer builds, an issue is opened (and closed
+#    again once it builds).
 on:
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
 
-env:
-  # The YARG nightly to compile against (YARC-Official/YARG-BleedingEdge release tag).
-  # The mod uses YARG internals, so bump this deliberately and test in game when moving to a newer YARG.
-  YARG_TAG: b3912
-
 jobs:
-  build:
+  resolve:
     runs-on: ubuntu-latest
+    outputs:
+      stable: ${{ steps.yarg.outputs.stable }}
+      nightly: ${{ steps.yarg.outputs.nightly }}
+      ref: ${{ steps.source.outputs.ref }}
+      release: ${{ steps.source.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Newest YARG versions
+        id: yarg
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "stable=$(gh release view -R YARC-Official/YARG --json tagName -q .tagName)" >> "$GITHUB_OUTPUT"
+          echo "nightly=$(gh release view -R YARC-Official/YARG-BleedingEdge --json tagName -q .tagName)" >> "$GITHUB_OUTPUT"
+
+      # The daily check tests what players have installed: the latest release's code.
+      - name: Source to build
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release=""
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            release="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            release="$GITHUB_REF_NAME"
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "ref=${release:-$GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the daily check may replace a release DLL
+      issues: write   # and opens/closes build-failure issues
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: Stable
+            yarg_repo: YARC-Official/YARG
+          - channel: Nightly
+            yarg_repo: YARC-Official/YARG-BleedingEdge
+    env:
+      YARG_TAG: ${{ matrix.channel == 'Stable' && needs.resolve.outputs.stable || needs.resolve.outputs.nightly }}
+      RELEASE: ${{ needs.resolve.outputs.release }}
+      DLL: YargNetplay-${{ matrix.channel }}.dll
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Cache YARG assemblies
         id: yarg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: yarg
           key: yarg-managed-${{ env.YARG_TAG }}
@@ -28,10 +81,8 @@ jobs:
       # Only YARG_Data/Managed is needed (the game and Unity assemblies the mod references); they aren't committed.
       - name: Download YARG ${{ env.YARG_TAG }}
         if: steps.yarg-cache.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "$YARG_TAG" -R YARC-Official/YARG-BleedingEdge -p '*-Windows-x64.zip' -O yarg.zip
+          gh release download "$YARG_TAG" -R "${{ matrix.yarg_repo }}" -p '*-Windows-x64.zip' -O yarg.zip
           unzip -q yarg.zip '*YARG_Data/Managed/*' -d yarg-raw
           managed="$(find yarg-raw -type d -path '*YARG_Data/Managed' | head -n 1)"
           test -n "$managed" || { echo "YARG_Data/Managed not found in the YARG zip"; exit 1; }
@@ -39,21 +90,61 @@ jobs:
           mv "$managed" yarg/YARG_Data/Managed
           rm -rf yarg.zip yarg-raw
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
-      - name: Build
+      - name: Build against YARG ${{ matrix.channel }} ${{ env.YARG_TAG }}
         run: |
           args=(-c Release "-p:YargDir=$PWD/yarg")
-          # Tag builds take their version from the tag (v1.2.3 -> 1.2.3); it becomes Plugin.Version.
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then args+=("-p:Version=${GITHUB_REF_NAME#v}"); fi
+          # Release builds take their version from the tag (v1.2.3 -> 1.2.3); it becomes Plugin.Version.
+          if [ -n "$RELEASE" ]; then args+=("-p:Version=${RELEASE#v}"); fi
           dotnet build YargNetplay.csproj "${args[@]}"
+          mv dist/YargNetplay.dll "dist/$DLL"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: YargNetplay
+          name: YargNetplay-${{ matrix.channel }}
           path: dist/
+
+      # The build is deterministic, so a different DLL means the new YARG changed what the mod compiles to.
+      - name: Update the release DLL if the rebuild differs
+        if: github.event_name == 'schedule' && env.RELEASE != ''
+        run: |
+          if gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p "$DLL" -O released.dll 2>/dev/null \
+             && cmp -s released.dll "dist/$DLL"; then
+            echo "$DLL in $RELEASE is already up to date for YARG $YARG_TAG."
+          else
+            echo "Replacing $DLL in $RELEASE with the build against YARG $YARG_TAG."
+            gh release upload "$RELEASE" "dist/$DLL" -R "$GITHUB_REPOSITORY" --clobber
+          fi
+
+      - name: Open an issue
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          title="Build fails against YARG ${{ matrix.channel }} $YARG_TAG"
+          gh label create yarg-compat -R "$GITHUB_REPOSITORY" --color B60205 \
+            --description "The mod doesn't build against a YARG release" 2>/dev/null || true
+          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label yarg-compat \
+            --json title -q "map(select(.title == \"$title\")) | length")"
+          if [ "$existing" = 0 ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --label yarg-compat --title "$title" --body \
+              "YARG Netplay (${RELEASE:-$GITHUB_SHA}) no longer builds against YARG ${{ matrix.channel }} \`$YARG_TAG\` (${{ matrix.yarg_repo }}).
+
+          Build log: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          This issue closes itself once a scheduled build against YARG ${{ matrix.channel }} passes again."
+          fi
+
+      - name: Close fixed issues
+        if: success() && github.event_name == 'schedule'
+        run: |
+          gh issue list -R "$GITHUB_REPOSITORY" --state open --label yarg-compat --json number,title \
+            -q '.[] | select(.title | startswith("Build fails against YARG ${{ matrix.channel }} ")) | .number' |
+          while read -r number; do
+            gh issue close "$number" -R "$GITHUB_REPOSITORY" \
+              --comment "Builds against YARG ${{ matrix.channel }} \`$YARG_TAG\` again: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          done
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -62,13 +153,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
-          name: YargNetplay
+          pattern: YargNetplay-*
+          merge-multiple: true
           path: dist
 
-      # The installers download releases/latest/download/YargNetplay.dll, and the mod's update check reads the
-      # latest release, so every v* tag becomes the release they pick up.
+      # The installers download releases/latest/download/YargNetplay-<Stable|Nightly>.dll, and the mod's update check
+      # reads the latest release.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

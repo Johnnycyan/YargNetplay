@@ -54,7 +54,7 @@ Every private member the mod touches is listed in `src/Game/Accessors.cs` and th
   curl -fsSL https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.sh | bash
   ```
 
-The installer downloads the newest YARG Netplay release from GitHub. It finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\`. Run it again to update the mod. To install a local build instead, pass `-PluginPath <dll>` (Windows) or set `YARGNETPLAY_DLL=<dll>` (Linux).
+The installer downloads the newest YARG Netplay release from GitHub, built for the YARG channel of each install (stable or nightly). It finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\`. Run it again to update the mod. To install a local build instead, pass `-PluginPath <dll>` (Windows) or set `YARGNETPLAY_DLL=<dll>` (Linux).
 
 - **Native Linux YARG:** BepInEx starts through `run_bepinex.sh`, so the installer adds a "YARG (Netplay)" app shortcut. The YARC Launcher's Play button starts YARG without the mod.
 - **YARG.exe under Wine or Proton:** the Windows BepInEx is installed. Start YARG with `WINEDLLOVERRIDES="winhttp=n,b"`.
@@ -63,9 +63,12 @@ At launch the mod checks GitHub for a newer release and shows a notification if 
 
 ## Releases
 
-GitHub Actions builds every push and pull request against the YARG nightly set by `YARG_TAG` in `.github/workflows/build.yml`. Pushing a `v*` tag (for example `git tag v0.3.0 && git push origin v0.3.0`) builds with that version and publishes a GitHub release with `YargNetplay.dll`, `YargNetplay-Installer.zip` and the install scripts, which the installers and the update check pick up.
+GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request against the newest YARG stable and nightly releases, one DLL per channel.
 
-Release builds (`dotnet build -c Release`) put the same files in `dist\`.
+- Pushing a `v*` tag (for example `git tag v0.3.0 && git push origin v0.3.0`) builds with that version and publishes a GitHub release with `YargNetplay-Stable.dll`, `YargNetplay-Nightly.dll`, `YargNetplay-Installer.zip` and the install scripts. The installers and the update check use the latest release.
+- Every day the latest release's code is rebuilt against the newest YARG stable and nightly. If a new YARG changes the built DLL, the release's DLL for that channel is replaced. If it no longer builds, an issue labeled `yarg-compat` is opened, and closed again once it builds.
+
+Release builds (`dotnet build -c Release`) put `YargNetplay.dll` and the installers in `dist\`.
 
 ## Build
 

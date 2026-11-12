@@ -16,7 +16,8 @@ LINUX_ZIP="BepInEx_linux_x64_$BEPINEX_VERSION.zip"
 LINUX_SHA256="f8ac87a97fb1ef85451c04ace1fddb7dd7eb0b079c179b989d6bc462c98bd365"
 WIN_ZIP="BepInEx_win_x64_$BEPINEX_VERSION.zip"
 WIN_SHA256="6c57a714a892efb4e9e1fef63d608a3391f30ec984031c465404e4ee381a0755"
-PLUGIN_URL="https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay.dll"
+# One build per YARG channel: YargNetplay-Stable.dll and YargNetplay-Nightly.dll.
+PLUGIN_URL="https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-%s.dll"
 
 step() { printf '\n\033[36m%s\033[0m\n' "$*"; }
 fail() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
@@ -60,6 +61,17 @@ find_installs() {
     done | awk '!seen[$0]++'
 }
 
+# Stable or Nightly, from the launcher's tag.txt (stable tags are v1.2.3, nightlies b1234); asks when there's none.
+channel_of() {
+    local tag answer
+    tag="$(cat "$(dirname "$1")/tag.txt" 2>/dev/null || true)"
+    case "$tag" in v[0-9]*) echo Stable; return ;; b[0-9]*) echo Nightly; return ;; esac
+    while true; do
+        ask "Is $1 YARG Stable or Nightly? (S/N) " answer
+        case "$answer" in [sS]*) echo Stable; return ;; [nN]*) echo Nightly; return ;; esac
+    done
+}
+
 label() {
     local tag
     tag="$(cat "$(dirname "$1")/tag.txt" 2>/dev/null || basename "$(dirname "$1")")"
@@ -98,16 +110,25 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# ------------------------------------------------------------ the plugin (the newest GitHub release)
+# ------------------------------------------------------------ the plugin (the newest GitHub release, per channel)
 
-if [ -n "${YARGNETPLAY_DLL:-}" ]; then
-    [ -f "$YARGNETPLAY_DLL" ] || fail "$YARGNETPLAY_DLL doesn't exist."
-    plugin="$YARGNETPLAY_DLL"
-else
-    step "Downloading the newest YARG Netplay..."
-    plugin="$tmp/YargNetplay.dll"
-    download "$PLUGIN_URL" "$plugin" || fail "Couldn't download YARG Netplay from GitHub."
-fi
+[ -z "${YARGNETPLAY_DLL:-}" ] || [ -f "$YARGNETPLAY_DLL" ] || fail "$YARGNETPLAY_DLL doesn't exist."
+
+plugin_for() { # channel -> path of the plugin to install (downloaded once per channel)
+    if [ -n "${YARGNETPLAY_DLL:-}" ]; then echo "$YARGNETPLAY_DLL"; return; fi
+    local file="$tmp/YargNetplay-$1.dll" url
+    if [ ! -f "$file" ]; then
+        step "Downloading the newest YARG Netplay for YARG $1..." >&2
+        # shellcheck disable=SC2059
+        url="$(printf "$PLUGIN_URL" "$1")"
+        download "$url" "$file" || fail "Couldn't download YARG Netplay from GitHub."
+    fi
+    echo "$file"
+}
+
+# Ask about channels up front (before anything is installed).
+channels=()
+for t in "${targets[@]}"; do channels+=("$(channel_of "$t")"); done
 
 # ------------------------------------------------------------ BepInEx (downloaded only when needed, verified)
 
@@ -124,7 +145,9 @@ fetch() { # zip name, sha256 -> path of the verified zip
 
 wine_note=0
 native_note=0
-for t in "${targets[@]}"; do
+for i in "${!targets[@]}"; do
+    t="${targets[$i]}"
+    plugin="$(plugin_for "${channels[$i]}")"
     step "Installing into $(label "$t"): $t"
     kind="$(game_kind "$t")"
 
