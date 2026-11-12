@@ -380,16 +380,18 @@ namespace YargNetplay.Net
                     bool has = item.LocalHas;
                     _conn.Send(MsgType.Availability, w => { w.WriteHash(hash); w.Write(has); });
 
+                    // The open setlist overlay already shows the new song, who added it and its download state.
+                    bool announce = !SetlistOverlay.ListShowing;
                     if (has)
                     {
                         NativeSetlist.Add(song);
-                        Notify.Info($"{PeerName} added {name} to the setlist");
+                        if (announce) Notify.Info($"{PeerName} added {name} to the setlist");
                     }
                     else
                     {
                         // Missing it: have the peer send it straight away.
                         _transfer.Request(hash);
-                        Notify.Info($"{PeerName} added {name}. You don't have it, downloading...");
+                        if (announce) Notify.Info($"{PeerName} added {name}. You don't have it, downloading...");
                     }
                     break;
                 }
@@ -585,7 +587,8 @@ namespace YargNetplay.Net
             if (SongLibrary.TryGet(hash, out var song))
             {
                 if (item != null) NativeSetlist.Add(song);
-                Notify.Success($"Downloaded {song.Name.Original}");
+                // The open setlist overlay already shows the song turning Ready.
+                if (!SetlistOverlay.ListShowing) Notify.Success($"Downloaded {song.Name.Original}");
             }
         }
 

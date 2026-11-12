@@ -21,6 +21,7 @@ namespace YargNetplay
         internal static ConfigEntry<int> RemoteDelayMs;
         internal static ConfigEntry<bool> AutoDelay;
         internal static ConfigEntry<string> ReceivedSongsFolder;
+        internal static ConfigEntry<bool> SetlistCollapsed;
 
         private void Awake()
         {
@@ -35,6 +36,8 @@ namespace YargNetplay
             ReceivedSongsFolder = Config.Bind("Songs", "ReceivedSongsFolder", "",
                 "Folder for songs received from other players. Empty uses NetplaySongs in YARG's data folder. " +
                 "Change it from the Online page so existing songs are moved along.");
+            SetlistCollapsed = Config.Bind("UI", "SetlistCollapsed", false,
+                "Whether the shared setlist overlay in the music library is collapsed to its header.");
 
             new Harmony(Guid).PatchAll(typeof(Plugin).Assembly);
 

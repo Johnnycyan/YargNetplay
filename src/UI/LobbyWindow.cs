@@ -162,7 +162,8 @@ namespace YargNetplay.UI
                 GUILayout.BeginHorizontal();
 
                 var transfer = session.Transfer?.GetStatus(item.Hash);
-                GUILayout.Label(StateLabel(item, transfer), RichLabel, GUILayout.Width(120));
+                var (state, color) = QueueStatus.Describe(item, transfer, session.PeerName);
+                GUILayout.Label($"<color={color}>{state}</color>", RichLabel, GUILayout.Width(160));
                 GUILayout.Label($"{item.Name} - {item.Artist}");
 
                 if (transfer?.Error != null && !transfer.Outgoing && GUILayout.Button("Retry", GUILayout.Width(50)))
@@ -186,23 +187,6 @@ namespace YargNetplay.UI
             if (GUILayout.Button("Open folder", GUILayout.Width(100)))
                 ReceivedSongs.OpenFolder();
             GUILayout.EndHorizontal();
-        }
-
-        private static string StateLabel(QueueItem item, TransferStatus transfer)
-        {
-            if (transfer != null && transfer.Error == null && !transfer.Done)
-            {
-                string verb = transfer.Outgoing ? "sending" : "receiving";
-                return $"<color=#80c0ff>{verb} {transfer.Progress * 100:0}%</color>";
-            }
-
-            return (item.LocalHas, item.PeerHas) switch
-            {
-                (true, true) => "<color=#80ff80>both</color>",
-                (true, null) => "<color=#cccccc>checking</color>",
-                (true, false) => "<color=#ffcc66>peer missing</color>",
-                _ => "<color=#ffcc66>you're missing</color>",
-            };
         }
 
         // ------------------------------------------------------------ helpers
