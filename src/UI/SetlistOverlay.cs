@@ -608,5 +608,16 @@ namespace YargNetplay.UI
         {
             private static void Prefix() => _instance?.StopEditing();
         }
+
+        /// <summary>
+        /// The open setlist already shows a song being added, so skip YARG's "Added To Setlist" toast then
+        /// (the peer's additions are already silent while the list shows).
+        /// </summary>
+        [HarmonyPatch(typeof(ToastManager), nameof(ToastManager.ToastSuccess))]
+        private static class AddedToastPatch
+        {
+            private static bool Prefix(string text) =>
+                !(ListShowing && text == YARG.Localization.Localize.Key("Menu.MusicLibrary.AddedToSet"));
+        }
     }
 }
