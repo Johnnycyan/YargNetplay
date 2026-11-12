@@ -9,7 +9,7 @@ namespace YargNetplay.Net
     /// </summary>
     internal static class Protocol
     {
-        public const int Version = 2;
+        public const int Version = 4;
         public const int DefaultPort = 47820;
         public const int MaxFrameBytes = 16 * 1024 * 1024;
     }
@@ -34,11 +34,26 @@ namespace YargNetplay.Net
         /// <summary>byte[20] hash, bool hasSong</summary>
         Availability,
 
-        /// <summary>int profileLength, byte[] profile (YargProfile.Serialize), string enginePresetJson</summary>
-        PlayerSetup,
+        /// <summary>
+        /// byte[20] hash, int profileLength, byte[] profile (YargProfile.Serialize), string enginePresetJson.
+        /// Sender confirmed its difficulty and is waiting to load this song; both sides load once both are ready for the same hash.
+        /// </summary>
+        Ready,
 
-        /// <summary>byte[20] hash. Host to client: load this song now.</summary>
-        LoadSong,
+        /// <summary>Sender cancelled its Ready.</summary>
+        Unready,
+
+        /// <summary>bool playingAShow, int count, count x byte[20] hash. Sender opened difficulty select for these songs; follow along.</summary>
+        OpenSetlist,
+
+        /// <summary>Sender cleared the shared setlist.</summary>
+        QueueClear,
+
+        /// <summary>bool ready. Sender's Ready toggle on the Online page.</summary>
+        LobbyReady,
+
+        /// <summary>Host to client: everyone go to song select (Quickplay) now.</summary>
+        GoToSongSelect,
 
         /// <summary>Sender finished loading the gameplay scene and is waiting at the start gate.</summary>
         Loaded,

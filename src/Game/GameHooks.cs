@@ -2,8 +2,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
+using YARG;
 using YARG.Core.Engine;
 using YARG.Gameplay;
+using YARG.Gameplay.HUD;
 using YARG.Gameplay.Player;
 using YARG.Player;
 using YARG.Scores;
@@ -21,7 +23,7 @@ namespace YargNetplay.Game
         private static bool _applyingRemotePause;
 
         public static Session ActiveSession =>
-            Session.Current is { InSongFlow: true, PeerSetup: not null } s ? s : null;
+            Session.Current is { InSongFlow: true, ActivePeerSetup: not null } s ? s : null;
 
         public static bool IsRemote(YargPlayer player) => player != null && player == RemotePlayer;
 
@@ -40,6 +42,45 @@ namespace YargNetplay.Game
             finally { _applyingRemotePause = false; }
         }
 
+        // ------------------------------------------------------------ ready gate
+
+        /// <summary>
+        /// Every way into gameplay (difficulty select, setlist continue, score-screen restart, pause menu)
+        /// goes through GlobalVariables.LoadScene, so this is the single place both players are synced up.
+        /// </summary>
+        [HarmonyPatch(typeof(GlobalVariables), nameof(GlobalVariables.LoadScene))]
+        private static class LoadScenePatch
+        {
+            private static bool Prefix(SceneIndex scene)
+            {
+                if (scene != SceneIndex.Gameplay) return true;
+
+                var session = Session.Current;
+                var state = GlobalVariables.State;
+                if (session is not { IsConnected: true } || state.CurrentReplay != null || state.IsPractice) return true;
+
+                return session.TryPassGameplayGate();
+            }
+        }
+
+        /// <summary>Restart and skip would desync the two players mid-song; block them before they touch any state.</summary>
+        [HarmonyPatch(typeof(PauseMenuManager))]
+        private static class PauseMenuPatch
+        {
+            private static IEnumerable<MethodBase> TargetMethods() => new[]
+            {
+                AccessTools.Method(typeof(PauseMenuManager), nameof(PauseMenuManager.Restart)),
+                AccessTools.Method(typeof(PauseMenuManager), nameof(PauseMenuManager.Skip)),
+            };
+
+            private static bool Prefix()
+            {
+                if (ActiveSession == null) return true;
+                UI.Notify.Warning("Restarting or skipping mid-song isn't available online yet.");
+                return false;
+            }
+        }
+
         // ------------------------------------------------------------ player injection
 
         /// <summary>Add the remote player to the player list right after GameManager reads PlayerContainer.</summary>
@@ -54,7 +95,7 @@ namespace YargNetplay.Game
 
                 GameManager = __instance;
                 LocalPlayer = __instance.YargPlayers.FirstOrDefault(p => !p.SittingOut && !p.IsReplay);
-                RemotePlayer = SongLauncher.CreateRemotePlayer(session.PeerSetup);
+                RemotePlayer = SongLauncher.CreateRemotePlayer(session.ActivePeerSetup);
                 RemoteDriver.BeginSong(session.RemoteDelaySeconds);
 
                 var players = new List<YargPlayer>(__instance.YargPlayers) { RemotePlayer };

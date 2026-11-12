@@ -35,6 +35,10 @@
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(YargManaged)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(YargManaged)\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(YargManaged)\UnityEngine.TextRenderingModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UniTask"><HintPath>$(YargManaged)\UniTask.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.TextMeshPro"><HintPath>$(YargManaged)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(YargManaged)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UIModule"><HintPath>$(YargManaged)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.InputSystem"><HintPath>$(YargManaged)\Unity.InputSystem.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Newtonsoft.Json"><HintPath>$(YargManaged)\Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>

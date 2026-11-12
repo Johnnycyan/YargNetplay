@@ -1,7 +1,9 @@
 using BepInEx;
+using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
+using YargNetplay.Net;
 
 namespace YargNetplay
 {
@@ -10,13 +12,22 @@ namespace YargNetplay
     {
         public const string Guid = "com.johnnycyan.yargnetplay";
         public const string Name = "YARG Netplay";
-        public const string Version = "0.1.0";
+        public const string Version = "0.2.0";
 
         internal static ManualLogSource Log;
+
+        internal static ConfigEntry<int> Port;
+        internal static ConfigEntry<string> LastJoinAddress;
+        internal static ConfigEntry<int> RemoteDelayMs;
 
         private void Awake()
         {
             Log = Logger;
+
+            Port = Config.Bind("Network", "Port", Protocol.DefaultPort, "TCP port used when hosting.");
+            LastJoinAddress = Config.Bind("Network", "LastJoinAddress", "", "Address last used to join (prefilled in the Join dialog).");
+            RemoteDelayMs = Config.Bind("Gameplay", "RemoteDelayMs", 200,
+                "How far behind the song the other player's highway runs, in ms. Must be above your ping.");
 
             new Harmony(Guid).PatchAll(typeof(Plugin).Assembly);
 
@@ -27,7 +38,7 @@ namespace YargNetplay
             host.hideFlags = HideFlags.HideAndDontSave;
             host.AddComponent<NetplayManager>();
 
-            Log.LogInfo($"{Name} {Version} loaded. Press F8 to open the netplay window.");
+            Log.LogInfo($"{Name} {Version} loaded. Use Online in the main menu (F8 opens the debug overlay).");
         }
     }
 }

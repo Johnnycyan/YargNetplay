@@ -30,7 +30,7 @@ namespace YargNetplay.UI
         public void Draw()
         {
             if (!Visible) return;
-            _rect = GUILayout.Window(WindowId, _rect, DrawWindow, "YARG Netplay  (F8 to hide)");
+            _rect = GUILayout.Window(WindowId, _rect, DrawWindow, "YARG Netplay debug overlay  (F8 to hide; use Online in the main menu)");
         }
 
         private void DrawWindow(int id)
@@ -42,8 +42,6 @@ namespace YargNetplay.UI
 
             if (session is { IsConnected: true })
             {
-                DrawLocalPlayer();
-                GUILayout.Space(6);
                 GUILayout.BeginHorizontal();
                 GUILayout.BeginVertical(GUILayout.Width(_rect.width * 0.5f));
                 DrawLibrary(session);
@@ -72,12 +70,15 @@ namespace YargNetplay.UI
                 GUILayout.Label("Port", GUILayout.Width(40));
                 _port = GUILayout.TextField(_port, GUILayout.Width(70));
                 if (GUILayout.Button("Host", GUILayout.Width(80)) && TryPort(out int hostPort))
-                    Session.Host(hostPort);
+                {
+                    Plugin.Port.Value = hostPort;
+                    NetplayDialogs.Host();
+                }
                 GUILayout.Space(20);
                 GUILayout.Label("IP", GUILayout.Width(20));
                 _joinHost = GUILayout.TextField(_joinHost, GUILayout.Width(180));
                 if (GUILayout.Button("Join", GUILayout.Width(80)) && TryPort(out int joinPort))
-                    Session.Join(_joinHost.Trim(), joinPort);
+                    NetplayDialogs.Join($"{_joinHost.Trim()}:{joinPort}");
                 GUILayout.EndHorizontal();
                 return;
             }
@@ -113,38 +114,6 @@ namespace YargNetplay.UI
             return false;
         }
 
-        // ------------------------------------------------------------ local player
-
-        private void DrawLocalPlayer()
-        {
-            var player = SongLauncher.GetLocalPlayer(out string error);
-            if (player == null)
-            {
-                GUILayout.Label("<color=#ffcc66>" + error + "</color>", RichLabel);
-                return;
-            }
-
-            var profile = player.Profile;
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"You: {profile.Name}", GUILayout.Width(200));
-
-            var instruments = SongLauncher.InstrumentsFor(profile).ToList();
-            if (GUILayout.Button(profile.CurrentInstrument.ToString(), GUILayout.Width(160)) && instruments.Count > 0)
-                profile.CurrentInstrument = Next(instruments, profile.CurrentInstrument);
-
-            var difficulties = Enum.GetValues(typeof(Difficulty)).Cast<Difficulty>().ToList();
-            if (GUILayout.Button(profile.CurrentDifficulty.ToString(), GUILayout.Width(120)))
-                profile.CurrentDifficulty = Next(difficulties, profile.CurrentDifficulty);
-
-            GUILayout.EndHorizontal();
-        }
-
-        private static T Next<T>(List<T> values, T current)
-        {
-            int i = values.IndexOf(current);
-            return values[(i + 1) % values.Count];
-        }
-
         // ------------------------------------------------------------ library
 
         private void DrawLibrary(Session session)
@@ -169,7 +138,10 @@ namespace YargNetplay.UI
                 var song = _filtered[i];
                 string tag = SongLibrary.IsReceived(song) ? "[received]  " : "";
                 if (GUI.Button(rect, $"+  {tag}{song.Name.Original}  -  {song.Artist.Original}", LeftButton))
+                {
                     session.AddToQueue(song);
+                    NativeSetlist.Add(song);
+                }
             });
         }
 
@@ -180,7 +152,7 @@ namespace YargNetplay.UI
 
         private void DrawQueue(Session session)
         {
-            GUILayout.Label(session.IsHost ? "Shared queue (you start songs)" : "Shared queue (host starts songs)");
+            GUILayout.Label("Shared setlist (start it from YARG's music library)");
 
             _queueScroll = GUILayout.BeginScrollView(_queueScroll, GUILayout.Height(384));
             foreach (var item in session.Queue.ToList())
@@ -193,10 +165,11 @@ namespace YargNetplay.UI
 
                 if (transfer?.Error != null && !transfer.Outgoing && GUILayout.Button("Retry", GUILayout.Width(50)))
                     session.RetryTransfer(item);
-                if (session.IsHost && GUILayout.Button("Play", GUILayout.Width(50)))
-                    _error = session.TryStartSong(item, out var err) ? null : err;
-                if (item.AddedByMe && GUILayout.Button("x", GUILayout.Width(24)))
-                    session.RemoveFromQueue(item);
+                if (GUILayout.Button("x", GUILayout.Width(24)))
+                {
+                    session.RemoveFromQueue(item.Hash);
+                    NativeSetlist.Remove(item.Hash);
+                }
 
                 GUILayout.EndHorizontal();
 

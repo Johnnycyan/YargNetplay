@@ -6,10 +6,12 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using UnityEngine.SceneManagement;
 using YARG;
 using YARG.Core.Input;
 using YARG.Core.Song;
 using YargNetplay.Game;
+using YargNetplay.UI;
 
 namespace YargNetplay.Net
 {
@@ -19,7 +21,8 @@ namespace YargNetplay.Net
         Hosting,    // listening, no peer yet
         Connecting,
         Lobby,
-        Loading,    // song chosen, waiting for setups / scene load / start gate
+        Waiting,    // we confirmed our difficulty and are waiting for the peer to be ready for the same song
+        Loading,    // both ready: gameplay scene loading / waiting at the start gate
         InSong,
     }
 
@@ -42,6 +45,11 @@ namespace YargNetplay.Net
     /// <summary>
     /// One netplay session with exactly one peer. The host's clock is the reference clock.
     /// All public members are main-thread only; network threads only touch <see cref="Connection"/>.
+    ///
+    /// Song flow: either player opens difficulty select (single song or setlist) and the other follows
+    /// (<see cref="MsgType.OpenSetlist"/>). Every load of the gameplay scene is held at
+    /// <see cref="TryPassGameplayGate"/> until both players are Ready for the same song, so setlist
+    /// continues and score-screen restarts work the same way as the first song.
     /// </summary>
     internal sealed class Session : IDisposable
     {
@@ -62,25 +70,38 @@ namespace YargNetplay.Net
         private readonly List<(double rtt, double offset)> _clockSamples = new();
 
         public bool IsHost { get; private set; }
+
+        /// <summary>The address the player typed or picked to join (null when hosting).</summary>
+        public string JoinAddress { get; private set; }
+
+        /// <summary>Ready toggles on the Online page. The host sends everyone to song select once the peer is ready.</summary>
+        public bool LocalLobbyReady { get; private set; }
+        public bool PeerLobbyReady { get; private set; }
         public SessionState State { get; private set; }
         public string Status { get; private set; } = "Not connected";
         public string LocalName { get; set; } = Environment.UserName;
-        public string PeerName { get; private set; }
+        public string PeerName { get; private set; } = "your partner";
         public double RttSeconds { get; private set; }
 
         /// <summary>How far behind the shared song clock the remote player is simulated.</summary>
-        public double RemoteDelaySeconds { get; set; } = 0.2;
+        public double RemoteDelaySeconds { get; set; } = Plugin.RemoteDelayMs.Value / 1000.0;
 
+        /// <summary>The shared setlist. Mirrored into YARG's own setlist by <see cref="NativeSetlist"/>.</summary>
         public List<QueueItem> Queue { get; } = new();
 
-        // Per-song state
-        public PeerSetup PeerSetup { get; private set; }
-        public SongEntry PendingSong { get; private set; }
+        // Ready handshake
+        private byte[] _localReadyHash;
+        private byte[] _peerReadyHash;
+        private PeerSetup _peerReadySetup;
+        private bool _gateOpen;
+        private bool _undoShowAdvanceOnCancel;
+
+        // Current song
+        public PeerSetup ActivePeerSetup { get; private set; }
         public bool LocalLoaded { get; private set; }
         public bool PeerLoaded { get; private set; }
         public double? StartAtHostTime { get; private set; }
         public RemoteInputBuffer RemoteInputs { get; } = new();
-        private bool _sceneLoadIssued;
 
         /// <summary>Host clock offset: hostTime = localTime + offset. Always 0 on the host.</summary>
         private double _clockOffset;
@@ -121,10 +142,16 @@ namespace YargNetplay.Net
             return s;
         }
 
-        public static Session Join(string host, int port)
+        public static Session Join(string host, int port, string address)
         {
             Current?.Dispose();
-            var s = new Session { IsHost = false, State = SessionState.Connecting, Status = $"Connecting to {host}:{port}..." };
+            var s = new Session
+            {
+                IsHost = false,
+                State = SessionState.Connecting,
+                Status = $"Connecting to {address}...",
+                JoinAddress = address,
+            };
             Current = s;
 
             new Thread(() =>
@@ -142,20 +169,22 @@ namespace YargNetplay.Net
 
         public void Dispose()
         {
-            try { _listener?.Stop(); } catch { /* ignore */ }
-            _listener = null;
-            _transfer?.Dispose();
-            _transfer = null;
-            _conn?.Dispose();
-            _conn = null;
-            State = SessionState.Idle;
+            bool wasConnected = IsConnected;
+            Shutdown();
             if (Current == this) Current = null;
+            if (wasConnected) Notify.Info("Left the online session");
         }
 
         private void Fail(string message)
         {
             Plugin.Log.LogWarning(message);
             Status = message;
+            Shutdown();
+            Notify.Error(message);
+        }
+
+        private void Shutdown()
+        {
             try { _listener?.Stop(); } catch { /* ignore */ }
             _listener = null;
             _transfer?.Dispose();
@@ -163,6 +192,10 @@ namespace YargNetplay.Net
             _conn?.Dispose();
             _conn = null;
             State = SessionState.Idle;
+            ResetReady();
+            ResetLobbyReady();
+            NetplayDialogs.CloseWaiting();
+            ReceivedLibrary.SetActive(false);
         }
 
         // ---------------------------------------------------------------- main-thread pump
@@ -171,8 +204,9 @@ namespace YargNetplay.Net
         {
             if (_pendingError != null)
             {
-                Fail("Connection failed: " + _pendingError);
+                var error = _pendingError;
                 _pendingError = null;
+                Fail("Connection failed: " + error);
                 return;
             }
 
@@ -196,6 +230,7 @@ namespace YargNetplay.Net
                 catch (Exception e) { Plugin.Log.LogError($"Bad message: {e}"); }
             }
 
+            if (_conn == null) return;
             if (_conn.IsClosed)
             {
                 Fail("Disconnected: " + _conn.CloseReason);
@@ -209,12 +244,7 @@ namespace YargNetplay.Net
                 _conn.Send(MsgType.Ping, w => w.Write(t));
             }
 
-            // Both setups exchanged: load the gameplay scene.
-            if (State == SessionState.Loading && !_sceneLoadIssued && PeerSetup != null && PendingSong != null)
-            {
-                _sceneLoadIssued = true;
-                SongLauncher.LoadGameplay(PendingSong);
-            }
+            CheckReady();
 
             // Host: both sides loaded, schedule the shared start.
             if (IsHost && State == SessionState.Loading && LocalLoaded && PeerLoaded && StartAtHostTime == null)
@@ -232,6 +262,7 @@ namespace YargNetplay.Net
             _transfer.SongReceived += OnSongReceived;
             State = SessionState.Lobby;
             Status = "Connected to " + _conn.RemoteEndPoint + ", saying hello...";
+            ReceivedLibrary.SetActive(true);
 
             _conn.Send(MsgType.Hello, w =>
             {
@@ -260,18 +291,29 @@ namespace YargNetplay.Net
 
                     if (protocol != Protocol.Version)
                     {
-                        _conn.Close($"Protocol mismatch (you {Protocol.Version}, peer {protocol}, mod {modVersion})");
+                        _conn.Close($"Netplay version mismatch (you {Protocol.Version}, {PeerName} {protocol}, mod {modVersion})");
                         return;
                     }
 
-                    // Engines must match exactly or the remote simulation drifts.
-                    Status = yargVersion == GameInfo.YargVersion
-                        ? $"Connected to {PeerName}"
-                        : $"Connected to {PeerName} - WARNING: YARG version differs ({GameInfo.YargVersion} vs {yargVersion})";
+                    if (!IsHost) SavedServers.RememberJoin(JoinAddress, PeerName);
 
-                    // Re-announce our queue so a reconnect shows both sides' songs.
+                    // Engines must match exactly or the remote simulation drifts.
+                    if (yargVersion == GameInfo.YargVersion)
+                    {
+                        Status = $"Connected to {PeerName}";
+                        Notify.Success(IsHost ? $"{PeerName} joined your game" : $"Connected to {PeerName}");
+                    }
+                    else
+                    {
+                        Status = $"Connected to {PeerName} - WARNING: YARG version differs ({GameInfo.YargVersion} vs {yargVersion})";
+                        Notify.Warning($"Connected to {PeerName}, but they run YARG {yargVersion} (you: {GameInfo.YargVersion}). Scores may not match.");
+                    }
+
+                    // Re-announce our setlist so a reconnect shows both sides' songs, and share any
+                    // setlist that was built before connecting.
                     foreach (var item in Queue.Where(q => q.AddedByMe))
                         SendQueueAdd(item);
+                    NativeSetlist.ResyncIfOpen();
                     break;
                 }
 
@@ -313,13 +355,44 @@ namespace YargNetplay.Net
                         Queue.Add(item);
                     }
                     item.PeerHas = true;
-                    item.LocalHas = SongLibrary.TryGet(hash, out _);
+                    item.LocalHas = SongLibrary.TryGet(hash, out var song);
 
                     bool has = item.LocalHas;
                     _conn.Send(MsgType.Availability, w => { w.WriteHash(hash); w.Write(has); });
 
-                    // Missing it: have the peer send it straight away.
-                    if (!has) _transfer.Request(hash);
+                    if (has)
+                    {
+                        NativeSetlist.Add(song);
+                        Notify.Info($"{PeerName} added {name} to the setlist");
+                    }
+                    else
+                    {
+                        // Missing it: have the peer send it straight away.
+                        _transfer.Request(hash);
+                        Notify.Info($"{PeerName} added {name}. You don't have it, downloading...");
+                    }
+                    break;
+                }
+
+                case MsgType.QueueRemove:
+                {
+                    var hash = r.ReadHash();
+                    var item = FindQueueItem(hash);
+                    if (item != null) Queue.Remove(item);
+                    NativeSetlist.Remove(hash);
+                    break;
+                }
+
+                case MsgType.QueueClear:
+                    Queue.Clear();
+                    NativeSetlist.Clear();
+                    break;
+
+                case MsgType.Availability:
+                {
+                    var item = FindQueueItem(r.ReadHash());
+                    bool has = r.ReadBoolean();
+                    if (item != null) item.PeerHas = has;
                     break;
                 }
 
@@ -343,25 +416,21 @@ namespace YargNetplay.Net
                     _transfer.OnFail(r);
                     break;
 
-                case MsgType.QueueRemove:
+                case MsgType.OpenSetlist:
                 {
-                    var item = FindQueueItem(r.ReadHash());
-                    if (item != null) Queue.Remove(item);
+                    bool show = r.ReadBoolean();
+                    int count = r.ReadInt32();
+                    var hashes = new List<byte[]>(count);
+                    for (int i = 0; i < count; i++) hashes.Add(r.ReadHash());
+                    OnPeerOpenedSetlist(show, hashes);
                     break;
                 }
 
-                case MsgType.Availability:
+                case MsgType.Ready:
                 {
-                    var item = FindQueueItem(r.ReadHash());
-                    bool has = r.ReadBoolean();
-                    if (item != null) item.PeerHas = has;
-                    break;
-                }
-
-                case MsgType.PlayerSetup:
-                {
+                    _peerReadyHash = r.ReadHash();
                     int len = r.ReadInt32();
-                    PeerSetup = new PeerSetup
+                    _peerReadySetup = new PeerSetup
                     {
                         ProfileBytes = r.ReadBytes(len),
                         EnginePresetJson = r.ReadString(),
@@ -369,18 +438,12 @@ namespace YargNetplay.Net
                     break;
                 }
 
-                case MsgType.LoadSong:
-                {
-                    var hash = r.ReadHash();
-                    if (!SongLibrary.TryGet(hash, out var song))
-                    {
-                        Status = "Host started a song you don't have yet (still transferring?)";
-                        _conn.Send(MsgType.LeaveSong);
-                        return;
-                    }
-                    BeginSong(song);
+                case MsgType.Unready:
+                    _peerReadyHash = null;
+                    _peerReadySetup = null;
+                    if (State == SessionState.Waiting)
+                        Notify.Warning($"{PeerName} backed out");
                     break;
-                }
 
                 case MsgType.Loaded:
                     PeerLoaded = true;
@@ -408,17 +471,51 @@ namespace YargNetplay.Net
                     break;
 
                 case MsgType.LeaveSong:
-                    Status = $"{PeerName} left the song";
-                    if (State == SessionState.Loading)
-                        EndSong();
+                    Notify.Warning($"{PeerName} quit the song");
+                    break;
+
+                case MsgType.LobbyReady:
+                    PeerLobbyReady = r.ReadBoolean();
+                    if (IsHost && PeerLobbyReady) Notify.Info($"{PeerName} is ready");
+                    break;
+
+                case MsgType.GoToSongSelect:
+                    ResetLobbyReady();
+                    NativeMenus.OpenLibrary();
+                    Notify.Info($"{PeerName} opened song select. Add songs to the setlist or pick one.");
                     break;
             }
         }
 
-        // ---------------------------------------------------------------- queue
+        // ---------------------------------------------------------------- lobby
+
+        public void SetLobbyReady(bool ready)
+        {
+            if (!IsConnected || LocalLobbyReady == ready) return;
+            LocalLobbyReady = ready;
+            _conn.Send(MsgType.LobbyReady, w => w.Write(ready));
+        }
+
+        /// <summary>Host: send both players to song select (Quickplay).</summary>
+        public void SendEveryoneToSongSelect()
+        {
+            if (!IsConnected || !IsHost) return;
+            _conn.Send(MsgType.GoToSongSelect);
+            ResetLobbyReady();
+            NativeMenus.OpenLibrary();
+        }
+
+        private void ResetLobbyReady()
+        {
+            LocalLobbyReady = false;
+            PeerLobbyReady = false;
+        }
+
+        // ---------------------------------------------------------------- shared setlist
 
         private QueueItem FindQueueItem(byte[] hash) => Queue.FirstOrDefault(q => q.Hash.AsSpan().SequenceEqual(hash));
 
+        /// <summary>A song was added to the local setlist (natively or from the overlay).</summary>
         public void AddToQueue(SongEntry song)
         {
             var hash = song.Hash.HashBytes;
@@ -436,10 +533,19 @@ namespace YargNetplay.Net
             if (IsConnected) SendQueueAdd(item);
         }
 
-        public void RemoveFromQueue(QueueItem item)
+        public void RemoveFromQueue(byte[] hash)
         {
+            var item = FindQueueItem(hash);
+            if (item == null) return;
             Queue.Remove(item);
-            if (IsConnected) _conn.Send(MsgType.QueueRemove, w => w.WriteHash(item.Hash));
+            if (IsConnected) _conn.Send(MsgType.QueueRemove, w => w.WriteHash(hash));
+        }
+
+        public void ClearQueue()
+        {
+            if (Queue.Count == 0) return;
+            Queue.Clear();
+            if (IsConnected) _conn.Send(MsgType.QueueClear);
         }
 
         public void RetryTransfer(QueueItem item)
@@ -452,6 +558,13 @@ namespace YargNetplay.Net
             var item = FindQueueItem(hash);
             if (item != null) item.LocalHas = true;
             _conn?.Send(MsgType.Availability, w => { w.WriteHash(hash); w.Write(true); });
+
+            ReceivedLibrary.Refresh();
+            if (SongLibrary.TryGet(hash, out var song))
+            {
+                if (item != null) NativeSetlist.Add(song);
+                Notify.Success($"Downloaded {song.Name.Original}");
+            }
         }
 
         private void SendQueueAdd(QueueItem item)
@@ -464,50 +577,156 @@ namespace YargNetplay.Net
             });
         }
 
-        // ---------------------------------------------------------------- song flow
+        // ---------------------------------------------------------------- following each other into difficulty select
 
-        /// <summary>Host only: start a queued song that both players have.</summary>
-        public bool TryStartSong(QueueItem item, out string error)
+        /// <summary>We opened difficulty select for these songs; bring the peer along.</summary>
+        public void SendOpenSetlist(IReadOnlyList<SongEntry> songs, bool show)
         {
-            error = null;
-            if (!IsHost) { error = "Only the host starts songs"; return false; }
-            if (State != SessionState.Lobby) { error = "Not in the lobby"; return false; }
-            if (item.PeerHas != true) { error = "Peer doesn't have this song yet (wait for the transfer to finish)"; return false; }
-            if (!SongLibrary.TryGet(item.Hash, out var song)) { error = "Song not in your library"; return false; }
+            if (!IsConnected || State is not (SessionState.Lobby or SessionState.Waiting)) return;
 
-            // Order matters: the client must receive our setup before LoadSong.
-            if (!BeginSong(song)) { error = Status; return false; }
-            _conn.Send(MsgType.LoadSong, w => w.WriteHash(item.Hash));
-            return true;
+            _conn.Send(MsgType.OpenSetlist, w =>
+            {
+                w.Write(show);
+                w.Write(songs.Count);
+                foreach (var s in songs) w.WriteHash(s.Hash.HashBytes);
+            });
+
+            // The setlist has started; the next one is built from scratch, like in single player.
+            if (show) Queue.Clear();
         }
 
-        private bool BeginSong(SongEntry song)
+        private void OnPeerOpenedSetlist(bool show, List<byte[]> hashes)
         {
-            if (!SongLauncher.TryPrepareLocalPlayer(song, out var setup, out var error))
+            var songs = new List<SongEntry>();
+            foreach (var hash in hashes)
             {
-                Status = error;
-                if (!IsHost) _conn.Send(MsgType.LeaveSong); // tell the waiting host
+                if (SongLibrary.TryGet(hash, out var song))
+                {
+                    songs.Add(song);
+                }
+                else
+                {
+                    _transfer.Request(hash);
+                    Notify.Warning($"{PeerName} picked a song you don't have yet. Downloading it; try again when it finishes.");
+                    return;
+                }
+            }
+
+            if (show) Queue.Clear();
+            NativeMenus.FollowIntoDifficultySelect(songs, show);
+        }
+
+        // ---------------------------------------------------------------- ready gate
+
+        /// <summary>
+        /// Called (via a patch) whenever the game wants to load the gameplay scene.
+        /// Returns true when the load may proceed; otherwise we send Ready and wait for the peer.
+        /// </summary>
+        public bool TryPassGameplayGate()
+        {
+            if (_gateOpen)
+            {
+                _gateOpen = false;
+                return true;
+            }
+
+            var song = GlobalVariables.State.CurrentSong;
+            if (song == null) return true;
+
+            if (State is SessionState.Loading or SessionState.InSong)
+            {
+                Notify.Warning("Restarting or skipping mid-song isn't available online yet.");
                 return false;
             }
 
-            LocalLoaded = false;
-            PeerLoaded = false;
-            StartAtHostTime = null;
-            _sceneLoadIssued = false;
-            RemoteInputs.Clear();
-
-            PendingSong = song;
-            State = SessionState.Loading;
-            Status = $"Loading {song.Name.Original}...";
-
-            _conn.Send(MsgType.PlayerSetup, w =>
+            if (!SongLauncher.TryPrepareLocalPlayer(song, out var setup, out var error))
             {
+                NetplayDialogs.ShowError(error);
+                return false;
+            }
+
+            if (Math.Abs(GlobalVariables.State.SongSpeed - 1f) > 0.001f)
+            {
+                GlobalVariables.State.SongSpeed = 1f;
+                Notify.Info("Song speed is fixed at 100% online.");
+            }
+
+            // The score screen's Continue advances ShowIndex before loading; undo that if we end up cancelling,
+            // or pressing Continue again would skip a song.
+            _undoShowAdvanceOnCancel = GlobalVariables.State.PlayingAShow
+                && SceneManager.GetActiveScene().buildIndex == (int) SceneIndex.Score;
+
+            _localReadyHash = song.Hash.HashBytes;
+            State = SessionState.Waiting;
+            _conn.Send(MsgType.Ready, w =>
+            {
+                w.WriteHash(_localReadyHash);
                 w.Write(setup.ProfileBytes.Length);
                 w.Write(setup.ProfileBytes);
                 w.Write(setup.EnginePresetJson);
             });
-            return true;
+
+            NetplayDialogs.ShowWaiting(PeerName, song.Name.Original, CancelReady);
+            CheckReady();
+            return false;
         }
+
+        public void CancelReady()
+        {
+            if (State != SessionState.Waiting) return;
+            _localReadyHash = null;
+            State = SessionState.Lobby;
+            _conn?.Send(MsgType.Unready);
+            NetplayDialogs.CloseWaiting();
+
+            if (_undoShowAdvanceOnCancel && GlobalVariables.State.ShowIndex > 0)
+            {
+                GlobalVariables.State.ShowIndex--;
+                GlobalVariables.State.CurrentSong = GlobalVariables.State.ShowSongs[GlobalVariables.State.ShowIndex];
+            }
+            _undoShowAdvanceOnCancel = false;
+        }
+
+        private void CheckReady()
+        {
+            if (State != SessionState.Waiting || _localReadyHash == null || _peerReadyHash == null) return;
+
+            if (!_localReadyHash.AsSpan().SequenceEqual(_peerReadyHash))
+            {
+                string theirs = SongLibrary.TryGet(_peerReadyHash, out var s) ? s.Name.Original : "a different song";
+                NetplayDialogs.CloseWaiting();
+                NetplayDialogs.ShowError($"{PeerName} is ready for {theirs}. Pick the same song to play together.");
+                CancelReady();
+                _peerReadyHash = null;
+                _peerReadySetup = null;
+                return;
+            }
+
+            // Both ready for the same song: this setup drives the remote player for this song.
+            ActivePeerSetup = _peerReadySetup;
+            ResetReady();
+            LocalLoaded = false;
+            PeerLoaded = false;
+            StartAtHostTime = null;
+            RemoteInputs.Clear();
+            State = SessionState.Loading;
+            Status = $"Playing with {PeerName}";
+
+            NetplayDialogs.CloseWaiting();
+            _gateOpen = true;
+            GlobalVariables.Instance.LoadScene(SceneIndex.Gameplay);
+        }
+
+        private void ResetReady()
+        {
+            _localReadyHash = null;
+            _peerReadyHash = null;
+            _peerReadySetup = null;
+            _gateOpen = false;
+            _undoShowAdvanceOnCancel = false;
+        }
+
+        // ---------------------------------------------------------------- in song
 
         /// <summary>Called by the start-gate patch once our gameplay scene has finished loading.</summary>
         public void MarkLocalLoaded()
@@ -521,11 +740,7 @@ namespace YargNetplay.Net
         public bool IsStartGateOpen()
         {
             if (StartAtHostTime is not double start || HostNow < start) return false;
-            if (State == SessionState.Loading)
-            {
-                State = SessionState.InSong;
-                Status = $"Playing with {PeerName}";
-            }
+            if (State == SessionState.Loading) State = SessionState.InSong;
             return true;
         }
 
@@ -540,15 +755,16 @@ namespace YargNetplay.Net
 
         public void SendLeaveSong() => _conn?.Send(MsgType.LeaveSong);
 
-        /// <summary>Called when the gameplay scene is left, for any reason.</summary>
+        /// <summary>
+        /// Called when the gameplay scene is unloaded. Only clears the song that was played: a Ready for
+        /// the next setlist song may already have arrived from the peer and must survive.
+        /// </summary>
         public void EndSong()
         {
-            PeerSetup = null;
-            PendingSong = null;
+            ActivePeerSetup = null;
             LocalLoaded = false;
             PeerLoaded = false;
             StartAtHostTime = null;
-            _sceneLoadIssued = false;
             RemoteInputs.Clear();
             if (State is SessionState.Loading or SessionState.InSong)
             {

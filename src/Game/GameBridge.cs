@@ -145,14 +145,6 @@ namespace YargNetplay.Game
             return true;
         }
 
-        public static void LoadGameplay(SongEntry song)
-        {
-            GlobalVariables.State = PersistentState.Default;
-            GlobalVariables.State.CurrentSong = song;
-            GlobalVariables.State.SongSpeed = 1f; // remote engine parameters assume 1x
-            GlobalVariables.Instance.LoadScene(SceneIndex.Gameplay);
-        }
-
         /// <summary>Builds the remote player as a replay-style player: no bindings, inputs fed by the mod.</summary>
         public static YargPlayer CreateRemotePlayer(Net.PeerSetup setup)
         {
