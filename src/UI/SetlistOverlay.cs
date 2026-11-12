@@ -22,7 +22,7 @@ namespace YargNetplay.UI
         // holds the Play / Add to Setlist button underneath.
         private const string CoverPath =
             "Horizontal Layout/Sidebar/Inner Container/Album Cover Container/Image/Album Cover Small Container/Album Cover Small Container/Album Cover Border";
-        private const float HeaderHeight = 56f, Padding = 14f, RowSpacing = 8f;
+        private const float HeaderHeight = 56f, Padding = 14f, RowSpacing = 4f, CornerRadius = 14f, ButtonSize = 34f;
 
         private static readonly AccessTools.FieldRef<Navigator, Stack<NavigationScheme>> SchemeStack =
             AccessTools.FieldRefAccess<Navigator, Stack<NavigationScheme>>("_schemeStack");
@@ -31,7 +31,7 @@ namespace YargNetplay.UI
 
         private const string AlbumContainerPath = "Horizontal Layout/Sidebar/Inner Container/Album Cover Container";
 
-        private RectTransform _bounds, _albumContainer, _header, _panel, _content;
+        private RectTransform _bounds, _cover, _albumContainer, _header, _panel, _content;
         private GameObject _ui;
         private ScrollRect _scroll;
         private TMP_Text _title, _toggle, _edit;
@@ -69,25 +69,23 @@ namespace YargNetplay.UI
             var parent = cover.parent;
             if (parent.Find("Netplay Setlist") != null) return;
 
-            // Same rect as the cover, drawn on top of it.
+            // Drawn on top of the cover; FitToSidePanel places it (the cover's height, the side panel's width).
             var go = new GameObject("Netplay Setlist", typeof(RectTransform));
             go.transform.SetParent(parent, false);
             go.transform.SetAsLastSibling();
             var rect = (RectTransform) go.transform;
-            rect.anchorMin = cover.anchorMin;
-            rect.anchorMax = cover.anchorMax;
-            rect.pivot = cover.pivot;
-            rect.anchoredPosition = cover.anchoredPosition;
-            rect.sizeDelta = cover.sizeDelta;
+            rect.anchorMin = rect.anchorMax = rect.pivot = new Vector2(0.5f, 0.5f);
 
             var font = library.transform.Find("Horizontal Layout/Sidebar").GetComponentInChildren<TMP_Text>(true)?.font;
-            go.AddComponent<SetlistOverlay>().Build(rect, library.transform.Find(AlbumContainerPath) as RectTransform, font);
+            go.AddComponent<SetlistOverlay>().Build(rect, cover, library.transform.Find(AlbumContainerPath) as RectTransform, font);
         }
 
-        private void Build(RectTransform bounds, RectTransform albumContainer, TMP_FontAsset font)
+        private void Build(RectTransform bounds, RectTransform cover, RectTransform albumContainer, TMP_FontAsset font)
         {
             _bounds = bounds;
+            _cover = cover;
             _albumContainer = albumContainer;
+            FitToSidePanel();
             _font = font;
 
             _ui = NewChild("UI", transform).gameObject;
@@ -123,7 +121,12 @@ namespace YargNetplay.UI
             _panel.anchorMax = new Vector2(1, 1);
             _panel.pivot = new Vector2(0.5f, 1);
             _panel.sizeDelta = Vector2.zero;
-            _panel.gameObject.AddComponent<Image>().color = new Color(0.02f, 0.04f, 0.08f, 0.9f);
+            // Square top (it hangs from the square header), rounded bottom. Opaque, so the rounded corners
+            // of the artwork underneath don't show through.
+            var panelImage = _panel.gameObject.AddComponent<Image>();
+            panelImage.sprite = BottomRoundedSprite();
+            panelImage.type = Image.Type.Sliced;
+            panelImage.color = new Color(0.02f, 0.04f, 0.08f, 1f);
 
             // Scrollable list (mouse wheel / drag).
             var list = NewChild("List", _panel);
@@ -137,8 +140,7 @@ namespace YargNetplay.UI
             _content.pivot = new Vector2(0.5f, 1);
             _content.sizeDelta = Vector2.zero; // new RectTransforms default to 100x100, which would widen it past the box
             var layout = _content.gameObject.AddComponent<VerticalLayoutGroup>();
-            int pad = Mathf.RoundToInt(Padding);
-            layout.padding = new RectOffset(pad, pad, pad - 4, pad);
+            layout.padding = new RectOffset(6, 6, 6, Mathf.RoundToInt(CornerRadius)); // the bottom clears the rounding
             layout.spacing = RowSpacing;
             layout.childControlWidth = layout.childControlHeight = true;
             layout.childForceExpandWidth = true;
@@ -182,6 +184,7 @@ namespace YargNetplay.UI
                 return;
             }
 
+            FitToSidePanel();
             var queue = session.Queue;
             if (queue.Count == 0) StopEditing();
             bool collapsed = Plugin.SetlistCollapsed.Value;
@@ -217,8 +220,9 @@ namespace YargNetplay.UI
                     string by = item.AddedByMe ? "you" : session.PeerName;
                     _rows[i].Show(Editing, Editing && i == _selected, Editing && i == _selected && _grabbed);
                     _rows[i].Text.text =
-                        $"<b>{i + 1}. <noparse>{item.Name}</noparse></b>  <color=#9fb3c8><noparse>{item.Artist}</noparse></color>\n" +
-                        $"<size=78%><color=#9fb3c8>Added by <noparse>{by}</noparse></color>  <color={color}><noparse>{state}</noparse></color></size>";
+                        $"<b>{i + 1}. <noparse>{item.Name}</noparse></b>\n" +
+                        $"<size=88%><color=#c3d0de><noparse>{item.Artist}</noparse></color></size>\n" +
+                        $"<size=76%><color=#9fb3c8>Added by <noparse>{by}</noparse></color>  <color={color}><noparse>{state}</noparse></color></size>";
                 }
             }
 
@@ -335,6 +339,54 @@ namespace YargNetplay.UI
             Refresh();
         }
 
+        /// <summary>The cover's height and position, the side panel's full width.</summary>
+        private void FitToSidePanel()
+        {
+            if (_cover == null || _albumContainer == null) return;
+            var side = WorldRect(_albumContainer);
+            var cover = WorldRect(_cover);
+            _bounds.position = new Vector3(side.center.x, cover.center.y, _bounds.position.z);
+            float scale = Mathf.Max(_bounds.lossyScale.x, 0.0001f);
+            _bounds.sizeDelta = new Vector2(side.width / scale, cover.height / scale);
+        }
+
+        private static Rect WorldRect(RectTransform rect)
+        {
+            var corners = new Vector3[4];
+            rect.GetWorldCorners(corners);
+            return Rect.MinMaxRect(corners[0].x, corners[0].y, corners[2].x, corners[2].y);
+        }
+
+        private static Sprite _bottomRounded;
+
+        /// <summary>A 9-sliced white sprite with rounded bottom corners and square top corners.</summary>
+        private static Sprite BottomRoundedSprite()
+        {
+            if (_bottomRounded != null) return _bottomRounded;
+            int r = Mathf.RoundToInt(CornerRadius), size = r * 2 + 2;
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp };
+            var pixels = new Color32[size * size];
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                // Distance into each bottom corner's circle (y = 0 is the bottom row), antialiased over one pixel.
+                float alpha = 1f;
+                if (y < r && (x < r || x >= size - r))
+                {
+                    float cx = x < r ? r : size - r, cy = r;
+                    float d = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), new Vector2(cx, cy));
+                    alpha = Mathf.Clamp01(r - d + 0.5f);
+                }
+                pixels[y * size + x] = new Color32(255, 255, 255, (byte) (alpha * 255));
+            }
+            texture.SetPixels32(pixels);
+            texture.Apply();
+            // 100 pixels per unit matches the canvas reference, so the radius is CornerRadius canvas units.
+            _bottomRounded = Sprite.Create(texture, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f, 0,
+                SpriteMeshType.FullRect, new Vector4(r, r, r, r));
+            return _bottomRounded;
+        }
+
         /// <summary>The space between the top of the album panel (the top of the screen) and the cover, capped at a normal header.</summary>
         private float HeaderHeightAboveCover()
         {
@@ -411,20 +463,30 @@ namespace YargNetplay.UI
                 Refresh();
             });
             var layout = root.gameObject.AddComponent<HorizontalLayoutGroup>();
-            layout.padding = new RectOffset(6, 6, 4, 4);
-            layout.spacing = 6;
+            layout.padding = new RectOffset(8, 8, 6, 6);
+            layout.spacing = 8;
             layout.childAlignment = TextAnchor.MiddleLeft;
             layout.childControlWidth = layout.childControlHeight = true;
             layout.childForceExpandWidth = layout.childForceExpandHeight = false;
 
+            // The text takes whatever width the buttons leave and wraps (title and artist each as much as needed):
+            // no preferred width of its own, so a long title can't squeeze the buttons.
             var text = NewText("Text", root, 22, TextAlignmentOptions.TopLeft);
             text.textWrappingMode = TextWrappingModes.Normal;
             text.overflowMode = TextOverflowModes.Overflow;
-            text.gameObject.AddComponent<LayoutElement>().flexibleWidth = 1;
+            var textElement = text.gameObject.AddComponent<LayoutElement>();
+            textElement.minWidth = 0;
+            textElement.preferredWidth = 0;
+            textElement.flexibleWidth = 1;
 
+            const float spacing = 4;
             var actions = NewChild("Actions", root);
+            var actionsElement = actions.gameObject.AddComponent<LayoutElement>();
+            actionsElement.minWidth = actionsElement.preferredWidth = ButtonSize * 3 + spacing * 2;
+            actionsElement.minHeight = actionsElement.preferredHeight = ButtonSize;
+            actionsElement.flexibleWidth = actionsElement.flexibleHeight = 0;
             var actionsLayout = actions.gameObject.AddComponent<HorizontalLayoutGroup>();
-            actionsLayout.spacing = 4;
+            actionsLayout.spacing = spacing;
             actionsLayout.childControlWidth = actionsLayout.childControlHeight = true;
             actionsLayout.childForceExpandWidth = actionsLayout.childForceExpandHeight = false;
             NewRowButton(actions, "\u25B2", () => Move(index, -1));
@@ -438,7 +500,8 @@ namespace YargNetplay.UI
         {
             var rect = NewChild("Button", parent);
             var element = rect.gameObject.AddComponent<LayoutElement>();
-            element.preferredWidth = element.preferredHeight = 34;
+            element.minWidth = element.preferredWidth = element.minHeight = element.preferredHeight = ButtonSize;
+            element.flexibleWidth = element.flexibleHeight = 0;
             rect.gameObject.AddComponent<Image>().color = new Color(1f, 1f, 1f, 0.12f);
             rect.gameObject.AddComponent<Button>().onClick.AddListener(() => onClick());
             var label = NewText("Glyph", rect, 18, TextAlignmentOptions.Center);
