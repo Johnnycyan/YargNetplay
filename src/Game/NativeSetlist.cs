@@ -50,8 +50,21 @@ namespace YargNetplay.Game
             try { change(); }
             finally { _applying = false; }
 
+            Refreshed(library);
+        }
+
+        /// <summary>
+        /// Redraws the list and asks YARG to rebuild the library's controls, which depend on whether the setlist is
+        /// empty (Yellow: Play a Show vs Start Set). YARG applies that once no popup or dialog blocks it.
+        /// </summary>
+        private static void Refreshed(MusicLibraryMenu library)
+        {
+            NeedsSchemeRefresh(library) = true;
             if (library.isActiveAndEnabled) library.RefreshAndReselect(preserveSelectedIndex: true);
         }
+
+        private static readonly AccessTools.FieldRef<MusicLibraryMenu, bool> NeedsSchemeRefresh =
+            AccessTools.FieldRefAccess<MusicLibraryMenu, bool>("_needsNavigationSchemeRefresh");
 
         /// <summary>
         /// The library menu is recreated with an empty setlist each time the menu scene loads: fill it from
@@ -80,7 +93,7 @@ namespace YargNetplay.Game
             foreach (var song in library.ShowPlaylist.ToList())
                 session.AddToQueue(song);
 
-            if (changed && library.isActiveAndEnabled) library.RefreshAndReselect(preserveSelectedIndex: true);
+            if (changed) Refreshed(library);
         }
 
         public static void ResyncIfOpen()

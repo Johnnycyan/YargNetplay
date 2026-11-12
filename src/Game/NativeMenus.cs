@@ -57,16 +57,42 @@ namespace YargNetplay.Game
             GlobalVariables.State.ShowIndex = 0;
             GlobalVariables.State.CurrentSong = songs[0];
 
-            // Re-open so it rebuilds for the new songs.
-            if (TopMenu == MenuManager.Menu.DifficultySelect) MenuManager.Instance.PopMenu();
-
             Following = true;
-            try { MenuManager.Instance.PushMenu(MenuManager.Menu.DifficultySelect); }
+            try
+            {
+                // Re-open so it rebuilds for the new songs.
+                if (TopMenu == MenuManager.Menu.DifficultySelect) MenuManager.Instance.PopMenu();
+                MenuManager.Instance.PushMenu(MenuManager.Menu.DifficultySelect);
+            }
             finally { Following = false; }
 
             Notify.Info(show
                 ? $"{session?.PeerName} started the setlist. Pick your difficulty."
                 : $"{session?.PeerName} picked {songs[0].Name.Original}. Pick your difficulty.");
+        }
+
+        /// <summary>The peer backed out of difficulty select: go back to the library too. False when not there.</summary>
+        public static bool FollowOutOfDifficultySelect()
+        {
+            if (!InMenuScene || TopMenu != MenuManager.Menu.DifficultySelect) return false;
+
+            Following = true;
+            try { MenuManager.Instance.PopMenu(); }
+            finally { Following = false; }
+            return true;
+        }
+
+        /// <summary>Backing out of difficulty select locally takes the peer back to the library too.</summary>
+        [HarmonyPatch(typeof(MenuManager), nameof(MenuManager.PopMenu))]
+        private static class PopMenuPatch
+        {
+            private static void Prefix(out bool __state) =>
+                __state = !Following && InMenuScene && TopMenu == MenuManager.Menu.DifficultySelect;
+
+            private static void Postfix(bool __state)
+            {
+                if (__state && TopMenu != MenuManager.Menu.DifficultySelect) Session.Current?.SendLeaveSetlist();
+            }
         }
 
         /// <summary>Opening difficulty select locally (single song or setlist) brings the peer along.</summary>

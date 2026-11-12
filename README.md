@@ -18,7 +18,7 @@ Everything runs inside the game and uses YARG's own menus: an **Online** entry i
   - Click the header, or press **Select** on a controller (shown as Setlist in the help bar), to collapse it. Collapsed, only the header shows and the artwork is fully visible. The choice is remembered.
   - While the list is expanded, the "added a song" and "Downloaded" toasts are skipped, since the list already shows both. Failed transfers still show a toast.
   - YARG's FPS counter is hidden on this screen while the overlay is shown, since it sits in the same corner. It comes back when you leave.
-- **Picking difficulty:** when either player opens difficulty select, for one song or by starting the setlist, the other player's game opens it too, for the same songs. Each player picks their own instrument, difficulty and modifiers.
+- **Picking difficulty:** when either player opens difficulty select, for one song or by starting the setlist, the other player's game opens it too, for the same songs. Each player picks their own instrument, difficulty and modifiers. Backing out of difficulty select takes both players back to the music library and cancels a pending Ready. The shared setlist is kept; it is only cleared once a setlist's first song actually starts.
 - **Starting:** every load of the gameplay scene goes through `GlobalVariables.LoadScene`.
   - The mod holds it with a native "Waiting for … to be ready" dialog until both players are ready for the same song, and the players' setups (serialized `YargProfile` plus engine preset) are exchanged as they confirm.
   - This covers the first song, the setlist's Continue on the score screen, and score-screen restarts.

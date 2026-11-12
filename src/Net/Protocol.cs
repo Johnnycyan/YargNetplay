@@ -9,7 +9,7 @@ namespace YargNetplay.Net
     /// </summary>
     internal static class Protocol
     {
-        public const int Version = 4;
+        public const int Version = 5;
         public const int DefaultPort = 47820;
         public const int MaxFrameBytes = 16 * 1024 * 1024;
     }
@@ -84,6 +84,9 @@ namespace YargNetplay.Net
 
         /// <summary>byte[20] hash, string reason</summary>
         SongFail,
+
+        /// <summary>Sender backed out of difficulty select to the music library; the receiver follows.</summary>
+        LeaveSetlist,
     }
 
     internal static class BinaryExtensions

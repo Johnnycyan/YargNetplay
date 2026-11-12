@@ -467,6 +467,10 @@ namespace YargNetplay.Net
                         Notify.Warning($"{PeerName} backed out");
                     break;
 
+                case MsgType.LeaveSetlist:
+                    OnPeerLeftSetlist();
+                    break;
+
                 case MsgType.Loaded:
                     PeerLoaded = true;
                     break;
@@ -615,9 +619,23 @@ namespace YargNetplay.Net
                 w.Write(songs.Count);
                 foreach (var s in songs) w.WriteHash(s.Hash.HashBytes);
             });
+        }
 
-            // The setlist has started; the next one is built from scratch, like in single player.
-            if (show) Queue.Clear();
+        /// <summary>We backed out of difficulty select to the library; take the peer back too.</summary>
+        public void SendLeaveSetlist()
+        {
+            if (!IsConnected || State is not (SessionState.Lobby or SessionState.Waiting)) return;
+            CancelReady();
+            _conn.Send(MsgType.LeaveSetlist);
+        }
+
+        private void OnPeerLeftSetlist()
+        {
+            CancelReady();
+            _peerReadyHash = null;
+            _peerReadySetup = null;
+            if (NativeMenus.FollowOutOfDifficultySelect())
+                Notify.Info($"{PeerName} went back to the song list");
         }
 
         private void OnPeerOpenedSetlist(bool show, List<byte[]> hashes)
@@ -637,7 +655,6 @@ namespace YargNetplay.Net
                 }
             }
 
-            if (show) Queue.Clear();
             NativeMenus.FollowIntoDifficultySelect(songs, show);
         }
 
@@ -726,6 +743,11 @@ namespace YargNetplay.Net
                 _peerReadySetup = null;
                 return;
             }
+
+            // A setlist has really started once its first song loads (not when difficulty select opens, which
+            // can be backed out of). The next setlist is built from scratch, like in single player: the menu
+            // scene's own setlist comes back empty too.
+            if (GlobalVariables.State.PlayingAShow && GlobalVariables.State.ShowIndex == 0) Queue.Clear();
 
             // Both ready for the same song: this setup drives the remote player for this song.
             ActivePeerSetup = _peerReadySetup;
