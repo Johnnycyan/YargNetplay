@@ -22,6 +22,8 @@ namespace YargNetplay
         internal static ConfigEntry<bool> AutoDelay;
         internal static ConfigEntry<string> ReceivedSongsFolder;
         internal static ConfigEntry<bool> SetlistCollapsed;
+        internal static ConfigEntry<string> PreferredInstrument;
+        internal static ConfigEntry<string> PreferredDifficulty;
 
         private void Awake()
         {
@@ -38,6 +40,11 @@ namespace YargNetplay
                 "Change it from the Online page so existing songs are moved along.");
             SetlistCollapsed = Config.Bind("UI", "SetlistCollapsed", false,
                 "Whether the shared setlist overlay in the music library is collapsed to its header.");
+            PreferredInstrument = Config.Bind("Gameplay", "PreferredInstrument", "Any",
+                "Instrument you plan to play online (YARG Instrument name, or Any). The music library only shows " +
+                "songs that have charts for both players' parts.");
+            PreferredDifficulty = Config.Bind("Gameplay", "PreferredDifficulty", "Expert",
+                "Difficulty for PreferredInstrument (Easy, Medium, Hard or Expert).");
 
             new Harmony(Guid).PatchAll(typeof(Plugin).Assembly);
 

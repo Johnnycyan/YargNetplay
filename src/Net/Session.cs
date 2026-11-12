@@ -214,6 +214,9 @@ namespace YargNetplay.Net
             ResetLobbyReady();
             NetplayDialogs.CloseWaiting();
             ReceivedLibrary.SetActive(false);
+            PeerPart = default;
+            PeerInSongSelect = false;
+            PartFilter.Refresh();
         }
 
         // ---------------------------------------------------------------- main-thread pump
@@ -289,6 +292,30 @@ namespace YargNetplay.Net
                 w.Write(Plugin.Version);
                 w.Write(LocalName ?? "Player");
             });
+            SendPartChoice();
+            SendSongSelectState(NativeMenus.InSongSelect);
+            PartFilter.ApplyToProfile(PartFilter.LocalPart);
+        }
+
+        // ---------------------------------------------------------------- song select presence
+
+        /// <summary>Whether the peer is in song select, so we can join them there without them pulling us in.</summary>
+        public bool PeerInSongSelect { get; private set; }
+
+        public void SendSongSelectState(bool inSongSelect)
+        {
+            if (IsConnected) _conn.Send(MsgType.SongSelectState, w => w.Write(inSongSelect));
+        }
+
+        // ---------------------------------------------------------------- preferred parts (library filter)
+
+        /// <summary>The peer's preferred part (Any until they tell us). Ours is <see cref="PartFilter.LocalPart"/>.</summary>
+        public PartChoice PeerPart { get; private set; }
+
+        public void SendPartChoice()
+        {
+            var part = PartFilter.LocalPart;
+            if (IsConnected) _conn.Send(MsgType.PartChoice, part.Write);
         }
 
         // ---------------------------------------------------------------- incoming
@@ -469,6 +496,15 @@ namespace YargNetplay.Net
 
                 case MsgType.LeaveSetlist:
                     OnPeerLeftSetlist();
+                    break;
+
+                case MsgType.PartChoice:
+                    PeerPart = PartChoice.Read(r);
+                    PartFilter.Refresh();
+                    break;
+
+                case MsgType.SongSelectState:
+                    PeerInSongSelect = r.ReadBoolean();
                     break;
 
                 case MsgType.Loaded:

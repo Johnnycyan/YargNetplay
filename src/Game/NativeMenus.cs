@@ -82,16 +82,42 @@ namespace YargNetplay.Game
             return true;
         }
 
-        /// <summary>Backing out of difficulty select locally takes the peer back to the library too.</summary>
+        /// <summary>
+        /// Whether this player is in song select: from opening the music library until backing out of it to the
+        /// Online page or main menu. Playing a song from it counts as still being there (the game returns to it).
+        /// </summary>
+        public static bool InSongSelect { get; private set; }
+
+        private static void SetInSongSelect(bool value)
+        {
+            if (InSongSelect == value) return;
+            InSongSelect = value;
+            Session.Current?.SendSongSelectState(value);
+        }
+
+        [HarmonyPatch(typeof(MusicLibraryMenu), "OnEnable")]
+        private static class LibraryEnablePatch
+        {
+            private static void Postfix() => SetInSongSelect(true);
+        }
+
+        /// <summary>
+        /// Backing out of difficulty select locally takes the peer back to the library too.
+        /// Backing out of the music library means this player left song select.
+        /// </summary>
         [HarmonyPatch(typeof(MenuManager), nameof(MenuManager.PopMenu))]
         private static class PopMenuPatch
         {
-            private static void Prefix(out bool __state) =>
-                __state = !Following && InMenuScene && TopMenu == MenuManager.Menu.DifficultySelect;
+            private static void Prefix(out MenuManager.Menu __state) =>
+                __state = InMenuScene ? TopMenu : MenuManager.Menu.None;
 
-            private static void Postfix(bool __state)
+            private static void Postfix(MenuManager.Menu __state)
             {
-                if (__state && TopMenu != MenuManager.Menu.DifficultySelect) Session.Current?.SendLeaveSetlist();
+                if (__state == MenuManager.Menu.DifficultySelect && !Following && TopMenu != MenuManager.Menu.DifficultySelect)
+                    Session.Current?.SendLeaveSetlist();
+
+                if (__state == MenuManager.Menu.MusicLibrary && TopMenu != MenuManager.Menu.MusicLibrary)
+                    SetInSongSelect(false);
             }
         }
 

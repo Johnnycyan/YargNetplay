@@ -9,7 +9,7 @@ namespace YargNetplay.Net
     /// </summary>
     internal static class Protocol
     {
-        public const int Version = 5;
+        public const int Version = 7;
         public const int DefaultPort = 47820;
         public const int MaxFrameBytes = 16 * 1024 * 1024;
     }
@@ -87,6 +87,12 @@ namespace YargNetplay.Net
 
         /// <summary>Sender backed out of difficulty select to the music library; the receiver follows.</summary>
         LeaveSetlist,
+
+        /// <summary>bool hasInstrument, int instrument, int difficulty. Sender's preferred part (song filter).</summary>
+        PartChoice,
+
+        /// <summary>bool. Whether the sender is in song select (music library or difficulty select).</summary>
+        SongSelectState,
     }
 
     internal static class BinaryExtensions

@@ -5,6 +5,7 @@ using HarmonyLib;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
+using YARG.Core;
 using YARG.Core.Input;
 using YARG.Helpers;
 using YARG.Localization;
@@ -45,6 +46,8 @@ namespace YargNetplay.UI
         private TMP_Text _sidebarTitle;
         private GameObject _editButton;
         private TMP_InputField _delayField;
+        private TMP_Dropdown _instrumentDropdown, _difficultyDropdown;
+        private Instrument[] _instrumentChoices = Array.Empty<Instrument>();
         private TMP_Text _delayLabel;
         private Toggle _autoDelayToggle;
         private ColoredButtonRef _big, _left, _right;
@@ -104,6 +107,8 @@ namespace YargNetplay.UI
                 field.onSelect = new TMP_InputField.SelectionEvent();
                 field.onDeselect = new TMP_InputField.SelectionEvent();
             }
+            foreach (var dropdown in root.GetComponentsInChildren<TMP_Dropdown>(true))
+                dropdown.onValueChanged = new TMP_Dropdown.DropdownEvent();
         }
 
         private void Build(GameObject rowPrefab, GameObject headerPrefab)
@@ -131,7 +136,19 @@ namespace YargNetplay.UI
             if (picture != null) picture.gameObject.SetActive(false);
 
             var options = sidebar.Find("ScrollView/Viewport/Content");
-            foreach (Transform option in options) option.gameObject.SetActive(option.name is "Input Calibration" or "Lefty Flip");
+            foreach (Transform option in options)
+                option.gameObject.SetActive(option.name is "Instrument Select" or "Engine Preset" or "Input Calibration" or "Lefty Flip");
+
+            // Preferred part: the profile sidebar's game mode and engine preset dropdowns, re-purposed.
+            var instrumentRow = options.Find("Instrument Select");
+            var difficultyRow = options.Find("Engine Preset");
+            difficultyRow.SetSiblingIndex(instrumentRow.GetSiblingIndex() + 1);
+            SetOptionName(instrumentRow, "INSTRUMENT");
+            SetOptionName(difficultyRow, "DIFFICULTY");
+            _instrumentDropdown = instrumentRow.GetComponentInChildren<TMP_Dropdown>(true);
+            _difficultyDropdown = difficultyRow.GetComponentInChildren<TMP_Dropdown>(true);
+            _instrumentDropdown.onValueChanged.AddListener(_ => OnPartEdited());
+            _difficultyDropdown.onValueChanged.AddListener(_ => OnPartEdited());
 
             var delayRow = options.Find("Input Calibration");
             var autoRow = options.Find("Lefty Flip");
@@ -201,8 +218,51 @@ namespace YargNetplay.UI
                 new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", Back),
             }, true));
 
+            FillPartDropdowns();
             Refresh(force: true);
         }
+
+        // ------------------------------------------------------------ preferred part
+
+        /// <summary>Instrument choices follow the active profile's game mode, so rebuild them each time the page opens.</summary>
+        private void FillPartDropdowns()
+        {
+            _instrumentChoices = PartFilter.ChoosableInstruments();
+            var part = PartFilter.LocalPart;
+
+            // A saved instrument this profile can't play would filter by a part nobody here can use.
+            if (part.Instrument is Instrument saved && Array.IndexOf(_instrumentChoices, saved) < 0)
+            {
+                part = new PartChoice(null, part.Difficulty);
+                PartFilter.SetLocalPart(part);
+            }
+
+            _instrumentDropdown.ClearOptions();
+            _instrumentDropdown.AddOptions(new[] { "Any" }.Concat(_instrumentChoices.Select(i => i.ToLocalizedName())).ToList());
+            _instrumentDropdown.SetValueWithoutNotify(part.Instrument is Instrument chosen ? Array.IndexOf(_instrumentChoices, chosen) + 1 : 0);
+
+            _difficultyDropdown.ClearOptions();
+            _difficultyDropdown.AddOptions(PartChoice.Difficulties.Select(d => d.ToLocalizedName()).ToList());
+            _difficultyDropdown.SetValueWithoutNotify(Mathf.Max(0, Array.IndexOf(PartChoice.Difficulties, part.Difficulty)));
+        }
+
+        private void OnPartEdited()
+        {
+            int index = _instrumentDropdown.value;
+            Instrument? instrument = index > 0 && index <= _instrumentChoices.Length ? _instrumentChoices[index - 1] : null;
+            var difficulty = PartChoice.Difficulties[Mathf.Clamp(_difficultyDropdown.value, 0, PartChoice.Difficulties.Length - 1)];
+            PartFilter.SetLocalPart(new PartChoice(instrument, difficulty));
+        }
+
+        private static void SetOptionName(Transform row, string text)
+        {
+            var label = row.Find("Option Name")?.GetComponent<TMP_Text>();
+            if (label != null) label.text = text;
+        }
+
+        private static string PartText(PartChoice part) => part.IsAny
+            ? "<size=70%><color=#9fb3c8>Any part</color></size>"
+            : $"<size=70%><color=#80c0ff>{part.Label}</color></size>";
 
         private void OnDisable()
         {
@@ -276,16 +336,16 @@ namespace YargNetplay.UI
             AddHeader("Players");
             if (session.IsHost)
             {
-                AddRow(() => $"{session.LocalName}   <size=70%><color=#ffd34d>HOST</color></size>");
+                AddRow(() => $"{session.LocalName}   <size=70%><color=#ffd34d>HOST</color></size>   {PartText(PartFilter.LocalPart)}");
                 if (view == View.Connected)
-                    AddRow(() => $"{session.PeerName}   {PingText(session)}   {ReadyText(session.PeerLobbyReady)}");
+                    AddRow(() => $"{session.PeerName}   {PingText(session)}   {PeerStatusText(session)}   {PartText(session.PeerPart)}");
                 else
                     AddHeader($"<size=70%>Waiting for a player. They join with your IP address and port {Plugin.Port.Value}.</size>");
             }
             else if (view == View.Connected)
             {
-                AddRow(() => $"{session.PeerName}   <size=70%><color=#ffd34d>HOST</color></size>   {PingText(session)}");
-                AddRow(() => $"{session.LocalName}   <size=70%><color=#9fb3c8>YOU</color></size>   {ReadyText(session.LocalLobbyReady)}");
+                AddRow(() => $"{session.PeerName}   <size=70%><color=#ffd34d>HOST</color></size>   {PingText(session)}   {(session.PeerInSongSelect ? InSongSelectText : "")}   {PartText(session.PeerPart)}");
+                AddRow(() => $"{session.LocalName}   <size=70%><color=#9fb3c8>YOU</color></size>   {(session.PeerInSongSelect ? "" : ReadyText(session.LocalLobbyReady))}   {PartText(PartFilter.LocalPart)}");
             }
             else
             {
@@ -294,6 +354,10 @@ namespace YargNetplay.UI
         }
 
         private static string PingText(Session s) => $"<size=70%><color=#9fb3c8>{s.RttSeconds * 1000:0} ms</color></size>";
+
+        private const string InSongSelectText = "<size=70%><color=#80c0ff>IN SONG SELECT</color></size>";
+
+        private static string PeerStatusText(Session s) => s.PeerInSongSelect ? InSongSelectText : ReadyText(s.PeerLobbyReady);
 
         private static string ReadyText(bool ready) => ready
             ? "<size=70%><color=#5ee07a>READY</color></size>"
@@ -335,6 +399,15 @@ namespace YargNetplay.UI
                     _primary = null;
                     break;
 
+                // The other player is already in song select: just go there (nobody needs to be pulled in).
+                case View.Connected when session.PeerInSongSelect:
+                    _sidebarTitle.text = $"{session.PeerName} is in song select";
+                    _big.Set("Go to Song Select", NativeMenus.OpenLibrary, color: colors.ConfirmButton);
+                    _left.Hide();
+                    _right.Set("Disconnect", () => session.Dispose(), color: cancel);
+                    _primary = NativeMenus.OpenLibrary;
+                    break;
+
                 case View.Connected when session.IsHost:
                     _sidebarTitle.text = $"Playing with {session.PeerName}";
                     _big.Set("Go to Song Select", session.SendEveryoneToSongSelect, enabled: session.PeerLobbyReady, color: colors.ConfirmButton);
@@ -361,6 +434,9 @@ namespace YargNetplay.UI
         {
             bool auto = Plugin.AutoDelay.Value;
             bool editable = session is not { InSongFlow: true };
+
+            _instrumentDropdown.interactable = editable;
+            _difficultyDropdown.interactable = editable && !PartFilter.LocalPart.IsAny;
 
             _autoDelayToggle.interactable = editable;
             if (_autoDelayToggle.isOn != auto) _autoDelayToggle.SetIsOnWithoutNotify(auto);
