@@ -3,9 +3,13 @@ name: Build
 # Builds the mod against the newest YARG stable and nightly, one DLL per channel.
 #  - Pushes and pull requests: build the pushed code.
 #  - v* tags: build and publish a GitHub release (what the installers and the in-game update check use).
-#  - Daily: rebuild the latest release's code against the newest YARG versions. If the DLL changes (a new YARG needed
-#    a rebuild), the release's DLL for that channel is replaced. If it no longer builds, an issue is opened (and closed
-#    again once it builds).
+#  - Daily (and run by hand): rebuild the latest release's code against the newest YARG versions. If the DLL changes
+#    (a new YARG needed a rebuild), the release's DLL for that channel is replaced. If it no longer builds, an issue is
+#    opened (and closed again once it builds).
+#
+# Pins: the repository variables YARG_STABLE_PIN / YARG_NIGHTLY_PIN (Settings > Secrets and variables > Actions >
+# Variables), when set to a YARG tag, make pushes and tag releases build that channel against that YARG version
+# instead of the newest one, e.g. while the newest nightly needs porting work. The daily check ignores pins.
 on:
   push:
     branches: [main]
@@ -24,13 +28,21 @@ jobs:
       ref: ${{ steps.source.outputs.ref }}
       release: ${{ steps.source.outputs.release }}
     steps:
-      - name: Newest YARG versions
+      - name: YARG versions to build against
         id: yarg
         env:
           GH_TOKEN: ${{ github.token }}
+          STABLE_PIN: ${{ vars.YARG_STABLE_PIN }}
+          NIGHTLY_PIN: ${{ vars.YARG_NIGHTLY_PIN }}
         run: |
-          echo "stable=$(gh release view -R YARC-Official/YARG --json tagName -q .tagName)" >> "$GITHUB_OUTPUT"
-          echo "nightly=$(gh release view -R YARC-Official/YARG-BleedingEdge --json tagName -q .tagName)" >> "$GITHUB_OUTPUT"
+          stable="$(gh release view -R YARC-Official/YARG --json tagName -q .tagName)"
+          nightly="$(gh release view -R YARC-Official/YARG-BleedingEdge --json tagName -q .tagName)"
+          if [ "$GITHUB_EVENT_NAME" != schedule ] && [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            stable="${STABLE_PIN:-$stable}"
+            nightly="${NIGHTLY_PIN:-$nightly}"
+          fi
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+          echo "nightly=$nightly" >> "$GITHUB_OUTPUT"
 
       # The daily check tests what players have installed: the latest release's code.
       - name: Source to build
@@ -39,7 +51,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           release=""
-          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             release="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)"
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             release="$GITHUB_REF_NAME"
@@ -109,7 +121,7 @@ jobs:
 
       # The build is deterministic, so a different DLL means the new YARG changed what the mod compiles to.
       - name: Update the release DLL if the rebuild differs
-        if: github.event_name == 'schedule' && env.RELEASE != ''
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && env.RELEASE != ''
         run: |
           if gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p "$DLL" -O released.dll 2>/dev/null \
              && cmp -s released.dll "dist/$DLL"; then
@@ -137,7 +149,7 @@ jobs:
           fi
 
       - name: Close fixed issues
-        if: success() && github.event_name == 'schedule'
+        if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
           gh issue list -R "$GITHUB_REPOSITORY" --state open --label yarg-compat --json number,title \
             -q '.[] | select(.title | startswith("Build fails against YARG ${{ matrix.channel }} ")) | .number' |

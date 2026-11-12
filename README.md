@@ -66,7 +66,8 @@ At launch the mod checks GitHub for a newer release and shows a notification if 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request against the newest YARG stable and nightly releases, one DLL per channel.
 
 - Pushing a `v*` tag (for example `git tag v0.3.0 && git push origin v0.3.0`) builds with that version and publishes a GitHub release with `YargNetplay-Stable.dll`, `YargNetplay-Nightly.dll`, `YargNetplay-Installer.zip` and the install scripts. The installers and the update check use the latest release.
-- Every day the latest release's code is rebuilt against the newest YARG stable and nightly. If a new YARG changes the built DLL, the release's DLL for that channel is replaced. If it no longer builds, an issue labeled `yarg-compat` is opened, and closed again once it builds.
+- Every day the latest release's code is rebuilt against the newest YARG stable and nightly. If a new YARG changes the built DLL, the release's DLL for that channel is replaced. If it no longer builds, an issue labeled `yarg-compat` is opened, and closed again once it builds. Running the workflow by hand does the same check.
+- While the newest YARG of a channel needs porting work, set the repository variable `YARG_NIGHTLY_PIN` (or `YARG_STABLE_PIN`) to the YARG tag that works. Pushes and releases then build that channel against it; the daily check still tests the newest version.
 
 Release builds (`dotnet build -c Release`) put `YargNetplay.dll` and the installers in `dist\`.
 
