@@ -121,12 +121,11 @@ namespace YargNetplay.UI
             _panel.anchorMax = new Vector2(1, 1);
             _panel.pivot = new Vector2(0.5f, 1);
             _panel.sizeDelta = Vector2.zero;
-            // Square top (it hangs from the square header), rounded bottom. Opaque, so the rounded corners
-            // of the artwork underneath don't show through.
+            // Square top (it hangs from the square header), rounded bottom. Semi-transparent over the artwork.
             var panelImage = _panel.gameObject.AddComponent<Image>();
             panelImage.sprite = BottomRoundedSprite();
             panelImage.type = Image.Type.Sliced;
-            panelImage.color = new Color(0.02f, 0.04f, 0.08f, 1f);
+            panelImage.color = new Color(0.02f, 0.04f, 0.08f, 0.9f);
 
             // Scrollable list (mouse wheel / drag).
             var list = NewChild("List", _panel);
