@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# YARG Netplay installer for Linux: installs BepInEx 5 (if needed) and the YargNetplay plugin into YARG.
+# YARG Netplay installer for Linux: installs BepInEx 5 (if needed) and the newest YargNetplay plugin from GitHub into YARG.
 # Run: bash install.sh [<YARG folder>]
+#  or: curl -fsSL https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.sh | bash
+# Run it again any time to update the mod. YARGNETPLAY_DLL=/path/to/YargNetplay.dll installs that file instead of
+# downloading the newest release (offline installs, testing a build).
 #
 # Native Linux YARG: BepInEx is started by run_bepinex.sh, so this also adds a "YARG (Netplay)" app shortcut.
 # YARG.exe under Wine/Proton: installs the Windows BepInEx; Wine must load its winhttp.dll (see the message at the end).
@@ -13,19 +16,13 @@ LINUX_ZIP="BepInEx_linux_x64_$BEPINEX_VERSION.zip"
 LINUX_SHA256="f8ac87a97fb1ef85451c04ace1fddb7dd7eb0b079c179b989d6bc462c98bd365"
 WIN_ZIP="BepInEx_win_x64_$BEPINEX_VERSION.zip"
 WIN_SHA256="6c57a714a892efb4e9e1fef63d608a3391f30ec984031c465404e4ee381a0755"
+PLUGIN_URL="https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay.dll"
 
 step() { printf '\n\033[36m%s\033[0m\n' "$*"; }
 fail() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# ------------------------------------------------------------ the plugin to install
-
-plugin="$here/YargNetplay.dll"
-if [ ! -f "$plugin" ]; then
-    plugin="$(find "$here/../bin/Release" -name YargNetplay.dll 2>/dev/null | head -n 1 || true)"
-    [ -n "$plugin" ] || fail "YargNetplay.dll wasn't found next to this installer. Extract the whole zip, then run it again."
-fi
+# Prompts read the terminal, so they still work when the script itself is piped in (curl ... | bash).
+ask() { read -r -p "$1" "$2" < /dev/tty; }
 
 for tool in unzip sha256sum; do
     command -v "$tool" >/dev/null || fail "This installer needs '$tool'. Install it with your package manager and run it again."
@@ -80,7 +77,7 @@ else
         echo "Found these YARG versions:"
         for i in "${!found[@]}"; do echo "  $((i + 1)). $(label "${found[$i]}")"; done
         echo "  A. All of them"
-        read -r -p "Install into which one? (press Enter for all) " choice
+        ask "Install into which one? (press Enter for all) " choice
         if [ -z "$choice" ] || [[ "$choice" =~ ^[aA] ]]; then targets=("${found[@]}")
         elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#found[@]} ]; then
             targets=("${found[$((choice - 1))]}")
@@ -95,13 +92,24 @@ for t in "${targets[@]}"; do
 done
 
 if pgrep -f 'YARG\.(x86_64|exe)' >/dev/null 2>&1; then
-    read -r -p "YARG is running. Close it, then press Enter to continue. "
+    ask "YARG is running. Close it, then press Enter to continue. " _
 fi
-
-# ------------------------------------------------------------ BepInEx (downloaded only when needed, verified)
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+# ------------------------------------------------------------ the plugin (the newest GitHub release)
+
+if [ -n "${YARGNETPLAY_DLL:-}" ]; then
+    [ -f "$YARGNETPLAY_DLL" ] || fail "$YARGNETPLAY_DLL doesn't exist."
+    plugin="$YARGNETPLAY_DLL"
+else
+    step "Downloading the newest YARG Netplay..."
+    plugin="$tmp/YargNetplay.dll"
+    download "$PLUGIN_URL" "$plugin" || fail "Couldn't download YARG Netplay from GitHub."
+fi
+
+# ------------------------------------------------------------ BepInEx (downloaded only when needed, verified)
 
 fetch() { # zip name, sha256 -> path of the verified zip
     local zip="$tmp/$1"
@@ -159,7 +167,7 @@ EOF
     fi
 
     mkdir -p "$t/BepInEx/plugins/YargNetplay"
-    cp -f "$plugin" "$t/BepInEx/plugins/YargNetplay/"
+    cp -f "$plugin" "$t/BepInEx/plugins/YargNetplay/YargNetplay.dll"
     echo "  Installed YARG Netplay."
 done
 

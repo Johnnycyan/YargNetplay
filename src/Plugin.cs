@@ -12,7 +12,7 @@ namespace YargNetplay
     {
         public const string Guid = "com.johnnycyan.yargnetplay";
         public const string Name = "YARG Netplay";
-        public const string Version = "0.2.0";
+        public const string Version = BuildInfo.Version; // from <Version> in the csproj (CI sets it from the tag)
 
         internal static ManualLogSource Log;
 
@@ -24,6 +24,7 @@ namespace YargNetplay
         internal static ConfigEntry<bool> SetlistCollapsed;
         internal static ConfigEntry<string> PreferredInstrument;
         internal static ConfigEntry<string> PreferredDifficulty;
+        internal static ConfigEntry<bool> CheckForUpdates;
 
         private void Awake()
         {
@@ -45,6 +46,8 @@ namespace YargNetplay
                 "songs that have charts for both players' parts.");
             PreferredDifficulty = Config.Bind("Gameplay", "PreferredDifficulty", "Expert",
                 "Difficulty for PreferredInstrument (Easy, Medium, Hard or Expert).");
+            CheckForUpdates = Config.Bind("Updates", "CheckForUpdates", true,
+                "Check GitHub for a newer YARG Netplay release at launch and show a notification if there is one.");
 
             new Harmony(Guid).PatchAll(typeof(Plugin).Assembly);
 

@@ -19,6 +19,7 @@ namespace YargNetplay
         {
             SceneManager.sceneUnloaded += OnSceneUnloaded;
             ReceivedSongs.Initialize();
+            UpdateCheck.Start();
         }
 
         private void OnDestroy()
@@ -34,6 +35,7 @@ namespace YargNetplay
 
             Session.Current?.Update();
             SyncMenuInputLock();
+            UpdateCheck.Poll();
         }
 
         private void OnGUI() => _window.Draw();

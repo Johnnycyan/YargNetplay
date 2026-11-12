@@ -1,8 +1,11 @@
-# YARG Netplay installer: installs BepInEx 5 (if needed) and the YargNetplay plugin into YARG.
+# YARG Netplay installer: installs BepInEx 5 (if needed) and the newest YargNetplay plugin from GitHub into YARG.
 # Run it through "Install YARG Netplay.bat", or: powershell -ExecutionPolicy Bypass -File install.ps1 [-YargPath <folder>]
+# Run it again any time to update the mod.
 param(
     # A YARG folder (the one with YARG.exe). Skips the search and the menu.
-    [string]$YargPath
+    [string]$YargPath,
+    # Install this YargNetplay.dll instead of downloading the newest release (offline installs, testing a build).
+    [string]$PluginPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,16 +19,7 @@ $BepInExSha256 = '6c57a714a892efb4e9e1fef63d608a3391f30ec984031c465404e4ee381a07
 function Write-Step($text) { Write-Host "`n$text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host "`n$text" -ForegroundColor Red; exit 1 }
 
-# ------------------------------------------------------------ the plugin to install
-
-# Release zip: next to this script. Source checkout: the Release build output.
-$plugin = Join-Path $PSScriptRoot 'YargNetplay.dll'
-if (-not (Test-Path $plugin)) {
-    $built = Get-ChildItem (Join-Path $PSScriptRoot '..\bin\Release') -Recurse -Filter 'YargNetplay.dll' -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($built) { $plugin = $built.FullName }
-    else { Fail "YargNetplay.dll wasn't found next to this installer. Extract the whole zip, then run the installer again." }
-}
+$PluginUrl = 'https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay.dll'
 
 # ------------------------------------------------------------ find YARG
 
@@ -100,6 +94,23 @@ if ($running) {
     [void](Read-Host)
 }
 
+$ProgressPreference = 'SilentlyContinue' # the progress bar makes Invoke-WebRequest very slow
+
+# ------------------------------------------------------------ the plugin (the newest GitHub release)
+
+if ($PluginPath) {
+    if (-not (Test-Path $PluginPath)) { Fail "$PluginPath doesn't exist." }
+    $plugin = (Resolve-Path $PluginPath).Path
+    $downloadedPlugin = $false
+} else {
+    Write-Step 'Downloading the newest YARG Netplay...'
+    $plugin = Join-Path ([IO.Path]::GetTempPath()) 'YargNetplay.dll'
+    try { Invoke-WebRequest -Uri $PluginUrl -OutFile $plugin -UseBasicParsing }
+    catch { Fail "Couldn't download YARG Netplay from GitHub: $($_.Exception.Message)" }
+    $downloadedPlugin = $true
+}
+$version = (Get-Item $plugin).VersionInfo.ProductVersion -replace '\+.*'
+
 # ------------------------------------------------------------ BepInEx (downloaded once, only if some target lacks it)
 
 function Test-BepInEx($folder) {
@@ -110,7 +121,6 @@ $zip = $null
 if ($targets | Where-Object { -not (Test-BepInEx $_.Path) }) {
     Write-Step "Downloading BepInEx $BepInExVersion..."
     $zip = Join-Path ([IO.Path]::GetTempPath()) "BepInEx_win_x64_$BepInExVersion.zip"
-    $ProgressPreference = 'SilentlyContinue' # the progress bar makes Invoke-WebRequest very slow
     try { Invoke-WebRequest -Uri $BepInExUrl -OutFile $zip -UseBasicParsing }
     catch { Fail "Couldn't download BepInEx: $($_.Exception.Message)" }
 
@@ -135,12 +145,12 @@ foreach ($t in $targets) {
 
     $pluginDir = Join-Path $t.Path 'BepInEx\plugins\YargNetplay'
     New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
-    Copy-Item $plugin $pluginDir -Force
-    $version = (Get-Item $plugin).VersionInfo.ProductVersion -replace '\+.*'
+    Copy-Item $plugin (Join-Path $pluginDir 'YargNetplay.dll') -Force
     Write-Host "  Installed YARG Netplay $version."
 }
 
 if ($zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
+if ($downloadedPlugin) { Remove-Item $plugin -Force -ErrorAction SilentlyContinue }
 
 Write-Host "`nDone. Start YARG and choose Online in the main menu." -ForegroundColor Green
 Write-Host 'If the YARC Launcher updates or verifies YARG, it may remove BepInEx. Run this installer again if Online disappears.'

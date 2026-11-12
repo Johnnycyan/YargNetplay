@@ -3,7 +3,7 @@
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>YargNetplay</AssemblyName>
-    <!-- Keep in sync with Plugin.Version. -->
+    <!-- Plugin.Version comes from this (BuildInfo.g.cs). CI release builds override it from the tag: -p:Version=1.2.3 -->
     <Version>0.2.0</Version>
     <RootNamespace>YargNetplay</RootNamespace>
     <LangVersion>latest</LangVersion>
@@ -49,15 +49,30 @@
     <Copy SourceFiles="$(TargetPath);$(TargetDir)$(TargetName).pdb" DestinationFolder="$(YargDir)\BepInEx\plugins\YargNetplay" />
   </Target>
 
-  <!-- Release builds also produce the installer zip: dist\YargNetplay-<version>.zip (installer + plugin). -->
+  <!-- Plugin.Version as a compile-time constant (BepInPlugin needs a const), from $(Version). -->
+  <Target Name="GenerateBuildInfo" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</BuildInfoFile>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(BuildInfoFile)" Overwrite="true" WriteOnlyWhenDifferent="true"
+                      Lines="namespace YargNetplay { internal static class BuildInfo { public const string Version = &quot;$(Version)&quot;%3B } }" />
+    <ItemGroup>
+      <Compile Include="$(BuildInfoFile)" />
+      <FileWrites Include="$(BuildInfoFile)" />
+    </ItemGroup>
+  </Target>
+
+  <!-- Release builds also produce the release assets in dist\: YargNetplay.dll (what the installers download)
+       and YargNetplay-Installer.zip (the installers, which fetch the newest YargNetplay.dll from GitHub). -->
   <Target Name="PackageRelease" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <PackageDir>$(BaseIntermediateOutputPath)package\</PackageDir>
     </PropertyGroup>
-    <RemoveDir Directories="$(PackageDir)" />
-    <Copy SourceFiles="$(TargetPath);installer\install.ps1;installer\Install YARG Netplay.bat;installer\install.sh" DestinationFolder="$(PackageDir)" />
+    <RemoveDir Directories="$(PackageDir);dist" />
     <MakeDir Directories="dist" />
-    <ZipDirectory SourceDirectory="$(PackageDir)" DestinationFile="dist\YargNetplay-$(Version).zip" Overwrite="true" />
+    <Copy SourceFiles="installer\install.ps1;installer\Install YARG Netplay.bat;installer\install.sh" DestinationFolder="$(PackageDir)" />
+    <ZipDirectory SourceDirectory="$(PackageDir)" DestinationFile="dist\YargNetplay-Installer.zip" Overwrite="true" />
+    <Copy SourceFiles="$(TargetPath);installer\install.ps1;installer\install.sh" DestinationFolder="dist" />
   </Target>
 
 </Project>
