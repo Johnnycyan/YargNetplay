@@ -39,6 +39,7 @@ namespace YargNetplay.UI
         private TMP_FontAsset _font;
         private readonly List<Row> _rows = new();
         private int _selected;
+        private int _scrolledTo = -1; // the selected song last scrolled into view; -1 = none yet
         private bool _grabbed;
         private NavigationScheme _editScheme;
         private static SetlistOverlay _instance;
@@ -232,14 +233,16 @@ namespace YargNetplay.UI
             float wanted = LayoutUtility.GetPreferredHeight(_content);
             _panel.sizeDelta = new Vector2(0, Mathf.Min(wanted, _bounds.rect.height));
 
-            // Show a newly added song straight away; while editing, keep the selected song in view.
+            // Show a newly added song straight away; while editing, bring the selected song into view when the
+            // selection changes (only then, so the player can still scroll the list freely).
             if (added && !Editing)
             {
                 Canvas.ForceUpdateCanvases();
                 _scroll.verticalNormalizedPosition = 0f;
             }
-            else if (Editing && queue.Count > 0)
+            else if (Editing && queue.Count > 0 && _selected != _scrolledTo)
             {
+                _scrolledTo = _selected;
                 ScrollIntoView(_rows[_selected].Root);
             }
         }
@@ -273,6 +276,7 @@ namespace YargNetplay.UI
             if (Editing || Session.Current is not { IsConnected: true, Queue: { Count: > 0 } }) return;
             Plugin.SetlistCollapsed.Value = false;
             _grabbed = false;
+            _scrolledTo = -1;
             _editScheme = new NavigationScheme(new()
             {
                 new NavigationScheme.Entry(MenuAction.Up, "Menu.Common.Up", () => Step(-1)),
