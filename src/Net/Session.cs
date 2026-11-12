@@ -131,6 +131,16 @@ namespace YargNetplay.Net
         public SongTransfer Transfer => _transfer;
         public bool InSongFlow => State is SessionState.Loading or SessionState.InSong;
 
+        /// <summary>
+        /// A restart or skip is under way: the song being played is over, but its scene stays up (paused) until both
+        /// players are ready for the next one.
+        /// </summary>
+        public bool ChangingSong { get; private set; }
+
+        /// <summary>Set when the next song was agreed while a gameplay scene was up: its unload must not end the new song.</summary>
+        private bool _replacingSong;
+        public bool ReplacingSong => _replacingSong;
+
         // ---------------------------------------------------------------- lifecycle
 
         public static Session Host(int port)
@@ -437,6 +447,20 @@ namespace YargNetplay.Net
                     NativeSetlist.Clear();
                     break;
 
+                case MsgType.QueueOrder:
+                {
+                    int count = r.ReadInt32();
+                    var order = new List<QueueItem>(count);
+                    for (int i = 0; i < count; i++)
+                        if (FindQueueItem(r.ReadHash()) is QueueItem listed && !order.Contains(listed)) order.Add(listed);
+                    // Anything the peer didn't list (added here in the meantime) keeps its place after the listed songs.
+                    order.AddRange(Queue.Where(q => !order.Contains(q)));
+                    Queue.Clear();
+                    Queue.AddRange(order);
+                    NativeSetlist.ApplyOrder();
+                    break;
+                }
+
                 case MsgType.Availability:
                 {
                     var item = FindQueueItem(r.ReadHash());
@@ -533,10 +557,21 @@ namespace YargNetplay.Net
                     break;
 
                 case MsgType.LeaveSong:
+                    // Leaving while a restart or skip waits for both players: drop the wait, then leave.
+                    if (ChangingSong) CancelReady(leaveSong: false);
                     Notify.Warning(GameHooks.ApplyRemoteLeave()
                         ? $"{PeerName} left the song. Back to the library."
                         : $"{PeerName} left the song");
                     break;
+
+                case MsgType.ChangeSong:
+                {
+                    int index = r.ReadInt32();
+                    var hash = r.ReadHash();
+                    bool skip = r.ReadBoolean();
+                    OnPeerChangedSong(index, hash, skip);
+                    break;
+                }
 
                 case MsgType.LobbyReady:
                     PeerLobbyReady = r.ReadBoolean();
@@ -603,6 +638,40 @@ namespace YargNetplay.Net
             if (item == null) return;
             Queue.Remove(item);
             if (IsConnected) _conn.Send(MsgType.QueueRemove, w => w.WriteHash(hash));
+        }
+
+        /// <summary>Moves a song up (-1) or down (+1) in the shared setlist. False when it can't move that way.</summary>
+        public bool MoveInQueue(int index, int delta)
+        {
+            int to = index + delta;
+            if (index < 0 || index >= Queue.Count || to < 0 || to >= Queue.Count) return false;
+            (Queue[index], Queue[to]) = (Queue[to], Queue[index]);
+            SendQueueOrder();
+            return true;
+        }
+
+        /// <summary>
+        /// YARG's own setlist was reordered (it only holds the songs this player has): put those songs in the same
+        /// order, in the places they already take in the shared setlist, so songs still downloading don't move.
+        /// </summary>
+        public void MatchQueueOrder(IList<byte[]> nativeOrder)
+        {
+            var native = nativeOrder.Select(FindQueueItem).Where(q => q != null).Distinct().ToList();
+            int next = 0;
+            for (int i = 0; i < Queue.Count && next < native.Count; i++)
+                if (native.Contains(Queue[i])) Queue[i] = native[next++];
+            SendQueueOrder();
+        }
+
+        private void SendQueueOrder()
+        {
+            if (!IsConnected) return;
+            var hashes = Queue.Select(q => q.Hash).ToList();
+            _conn.Send(MsgType.QueueOrder, w =>
+            {
+                w.Write(hashes.Count);
+                foreach (var hash in hashes) w.WriteHash(hash);
+            });
         }
 
         public void ClearQueue()
@@ -713,8 +782,9 @@ namespace YargNetplay.Net
 
             if (State is SessionState.Loading or SessionState.InSong)
             {
-                Notify.Warning("Restarting or skipping mid-song isn't available online yet.");
-                return false;
+                // Only a restart or skip announced to the peer may leave the song for another one.
+                if (!ChangingSong) return false;
+                State = SessionState.Lobby;
             }
 
             if (!SongLauncher.TryPrepareLocalPlayer(song, out var setup, out var error))
@@ -744,14 +814,21 @@ namespace YargNetplay.Net
                 w.Write(setup.EnginePresetJson);
             });
 
-            NetplayDialogs.ShowWaiting(PeerName, song.Name.Original, CancelReady);
+            NetplayDialogs.ShowWaiting(PeerName, song.Name.Original, () => CancelReady());
             CheckReady();
             return false;
         }
 
-        public void CancelReady()
+        /// <summary>
+        /// Cancels our Ready. During a restart or skip the old song's scene is still up, so cancelling also leaves it
+        /// (for both players) unless <paramref name="leaveSong"/> is false because the song is being left anyway.
+        /// </summary>
+        public void CancelReady(bool leaveSong = true)
         {
             if (State != SessionState.Waiting) return;
+            if (ChangingSong && leaveSong && GameHooks.GameManager != null)
+                GameHooks.GameManager.ForceQuitSong(); // while ChangingSong is still set, so the peer is told
+            ChangingSong = false;
             _localReadyHash = null;
             State = SessionState.Lobby;
             _conn?.Send(MsgType.Unready);
@@ -786,6 +863,8 @@ namespace YargNetplay.Net
             if (GlobalVariables.State.PlayingAShow && GlobalVariables.State.ShowIndex == 0) Queue.Clear();
 
             // Both ready for the same song: this setup drives the remote player for this song.
+            _replacingSong = GameHooks.GameManager != null; // a restart or skip: the old scene unloads after this
+            ChangingSong = false;
             ActivePeerSetup = _peerReadySetup;
             ResetReady();
             LocalLoaded = false;
@@ -839,11 +918,55 @@ namespace YargNetplay.Net
         public void SendLeaveSong() => _conn?.Send(MsgType.LeaveSong);
 
         /// <summary>
+        /// We restarted the song or skipped to <paramref name="song"/> (setlist position <paramref name="showIndex"/>)
+        /// from the pause menu. YARG then reloads the scene, which waits at the ready gate for the peer to follow.
+        /// </summary>
+        public void BeginSongChange(SongEntry song, int showIndex, bool skip)
+        {
+            if (!IsConnected || ChangingSong || State is not (SessionState.Loading or SessionState.InSong)) return;
+            ChangingSong = true;
+            _conn.Send(MsgType.ChangeSong, w =>
+            {
+                w.Write(showIndex);
+                w.WriteHash(song.Hash.HashBytes);
+                w.Write(skip);
+            });
+        }
+
+        private void OnPeerChangedSong(int showIndex, byte[] hash, bool skip)
+        {
+            // Both pressed at once: each is already waiting at the gate, which settles whether it's the same song.
+            if (ChangingSong || GameHooks.GameManager == null || State is not (SessionState.Loading or SessionState.InSong)) return;
+            if (!SongLibrary.TryGet(hash, out var song))
+            {
+                Notify.Warning($"{PeerName} skipped to a song you don't have.");
+                return;
+            }
+
+            // PersistentState is a struct: write through GlobalVariables.State, not a copy.
+            if (GlobalVariables.State.PlayingAShow && showIndex >= 0 && showIndex < GlobalVariables.State.ShowSongs.Count)
+                GlobalVariables.State.ShowIndex = showIndex;
+            GlobalVariables.State.CurrentSong = song;
+            ChangingSong = true;
+
+            Notify.Info(skip ? $"{PeerName} skipped to {song.Name.Original}" : $"{PeerName} restarted the song");
+            NetplayDialogs.CloseLeaveConfirm();
+            GlobalVariables.Instance.LoadScene(SceneIndex.Gameplay); // held at the ready gate like our own restart
+        }
+
+        /// <summary>
         /// Called when the gameplay scene is unloaded. Only clears the song that was played: a Ready for
         /// the next setlist song may already have arrived from the peer and must survive.
         /// </summary>
         public void EndSong()
         {
+            // The next song (restart or skip) was already set up before this scene unloaded.
+            if (_replacingSong)
+            {
+                _replacingSong = false;
+                return;
+            }
+
             ActivePeerSetup = null;
             LocalLoaded = false;
             PeerLoaded = false;

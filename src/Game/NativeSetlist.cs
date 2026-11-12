@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using HarmonyLib;
 using UnityEngine;
@@ -17,7 +18,7 @@ namespace YargNetplay.Game
         private static bool _applying;
 
         private static MusicLibraryMenu FindLibrary() =>
-            Object.FindAnyObjectByType<MusicLibraryMenu>(FindObjectsInactive.Include);
+            UnityEngine.Object.FindAnyObjectByType<MusicLibraryMenu>(FindObjectsInactive.Include);
 
         private static Session ConnectedSession => Session.Current is { IsConnected: true } s ? s : null;
 
@@ -27,7 +28,56 @@ namespace YargNetplay.Game
         {
             var library = FindLibrary();
             if (library == null || library.ShowPlaylist.ContainsSong(song)) return;
-            Apply(library, () => library.ShowPlaylist.AddSong(song));
+            // A song that finished downloading goes where it is in the shared setlist, not at the end.
+            Apply(library, () =>
+            {
+                library.ShowPlaylist.AddSong(song);
+                SortToSharedOrder(library);
+            });
+        }
+
+        /// <summary>The shared setlist was reordered: put YARG's setlist (the songs this player has) in the same order.</summary>
+        public static void ApplyOrder()
+        {
+            var library = FindLibrary();
+            if (library == null || library.ShowPlaylist.Count < 2) return;
+            Apply(library, () => SortToSharedOrder(library));
+        }
+
+        private static void SortToSharedOrder(MusicLibraryMenu library)
+        {
+            var queue = ConnectedSession?.Queue;
+            if (queue == null) return;
+
+            int Position(HashWrapper hash)
+            {
+                int i = queue.FindIndex(q => hash.HashBytes.AsSpan().SequenceEqual(q.Hash));
+                return i < 0 ? int.MaxValue : i;
+            }
+
+            var hashes = library.ShowPlaylist.SongHashes;
+            var sorted = hashes.Select((hash, index) => (hash, index))
+                .OrderBy(e => Position(e.hash)).ThenBy(e => e.index) // stable: unknown songs keep their order at the end
+                .Select(e => e.hash).ToList();
+            hashes.Clear();
+            hashes.AddRange(sorted);
+        }
+
+        // ------------------------------------------------------------ setlist overlay edits
+
+        /// <summary>Removes a song from the shared setlist for both players, whether or not this player has it.</summary>
+        public static void RemoveShared(byte[] hash)
+        {
+            ConnectedSession?.RemoveFromQueue(hash);
+            Remove(hash);
+        }
+
+        /// <summary>Moves a song up (-1) or down (+1) in the shared setlist for both players.</summary>
+        public static bool MoveShared(int index, int delta)
+        {
+            if (ConnectedSession?.MoveInQueue(index, delta) != true) return false;
+            ApplyOrder();
+            return true;
         }
 
         public static void Remove(byte[] hash)
@@ -119,6 +169,23 @@ namespace YargNetplay.Game
             private static void Postfix(Playlist __instance, SongEntry song)
             {
                 if (__instance.Ephemeral && !_applying) ConnectedSession?.RemoveFromQueue(song.Hash.HashBytes);
+            }
+        }
+
+        /// <summary>YARG's own setlist view moves songs with Left/Right; share the new order.</summary>
+        [HarmonyPatch]
+        private static class MoveSongPatch
+        {
+            private static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods() => new[]
+            {
+                AccessTools.Method(typeof(Playlist), nameof(Playlist.MoveSongUp)),
+                AccessTools.Method(typeof(Playlist), nameof(Playlist.MoveSongDown)),
+            };
+
+            private static void Postfix(Playlist __instance)
+            {
+                if (__instance.Ephemeral && !_applying)
+                    ConnectedSession?.MatchQueueOrder(__instance.SongHashes.Select(h => h.HashBytes).ToList());
             }
         }
 

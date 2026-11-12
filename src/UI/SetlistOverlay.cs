@@ -34,9 +34,13 @@ namespace YargNetplay.UI
         private RectTransform _bounds, _albumContainer, _header, _panel, _content;
         private GameObject _ui;
         private ScrollRect _scroll;
-        private TMP_Text _title, _toggle;
+        private TMP_Text _title, _toggle, _edit;
         private TMP_FontAsset _font;
-        private readonly List<TMP_Text> _rows = new();
+        private readonly List<Row> _rows = new();
+        private int _selected;
+        private bool _grabbed;
+        private NavigationScheme _editScheme;
+        private static SetlistOverlay _instance;
         private float _nextRefresh;
         private bool _hidFps;
         private int _lastCount = -1;
@@ -44,7 +48,14 @@ namespace YargNetplay.UI
         /// <summary>True while the expanded list is on screen, so "X added a song" toasts would only repeat it.</summary>
         public static bool ListShowing { get; private set; }
 
-        private static void ToggleCollapsed() => Plugin.SetlistCollapsed.Value = !Plugin.SetlistCollapsed.Value;
+        /// <summary>True while the setlist is being edited (its own controls are on top of the library's).</summary>
+        public static bool Editing => _instance != null && _instance._editScheme != null;
+
+        private static void ToggleCollapsed()
+        {
+            _instance?.StopEditing();
+            Plugin.SetlistCollapsed.Value = !Plugin.SetlistCollapsed.Value;
+        }
 
         // ------------------------------------------------------------ creation
 
@@ -93,13 +104,13 @@ namespace YargNetplay.UI
             _header.gameObject.AddComponent<Button>().onClick.AddListener(ToggleCollapsed);
 
             _title = NewText("Title", _header, 26, TextAlignmentOptions.MidlineLeft);
-            Stretch(_title.rectTransform, left: Padding, right: Padding + 70); // room for Show/Hide
+            Stretch(_title.rectTransform, left: Padding, right: Padding + 140); // room for Edit and Show/Hide
             _title.fontStyle = FontStyles.Bold | FontStyles.UpperCase;
 
-            _toggle = NewText("Toggle", _header, 20, TextAlignmentOptions.MidlineRight);
-            Stretch(_toggle.rectTransform, left: Padding, right: Padding);
-            _toggle.fontStyle = FontStyles.Bold | FontStyles.UpperCase;
-            foreach (var text in new[] { _title, _toggle })
+            // Edit and Show/Hide: their own click targets on top of the header's (which collapses).
+            _toggle = NewHeaderButton("Toggle", Padding, ToggleCollapsed);
+            _edit = NewHeaderButton("Edit", Padding + 70, () => { if (Editing) StopEditing(); else StartEditing(); });
+            foreach (var text in new[] { _title, _toggle, _edit })
             {
                 text.enableAutoSizing = true;
                 text.fontSizeMin = 12;
@@ -165,16 +176,21 @@ namespace YargNetplay.UI
             HideFpsCounter(connected);
             if (!connected)
             {
+                StopEditing();
                 ListShowing = false;
                 _lastCount = -1;
                 return;
             }
 
             var queue = session.Queue;
+            if (queue.Count == 0) StopEditing();
             bool collapsed = Plugin.SetlistCollapsed.Value;
             _header.sizeDelta = new Vector2(0, HeaderHeightAboveCover());
             _title.text = $"Setlist  <size=75%><color=#9fb3c8>{queue.Count} song{(queue.Count == 1 ? "" : "s")}</color></size>";
             _toggle.text = $"<color=#9fb3c8>{(collapsed ? "Show" : "Hide")}</color>";
+            _edit.text = Editing ? "<color=#ffd34d>Done</color>" : "<color=#9fb3c8>Edit</color>";
+            _edit.transform.parent.gameObject.SetActive(queue.Count > 0);
+            _selected = Mathf.Clamp(_selected, 0, Mathf.Max(queue.Count - 1, 0));
 
             bool added = _lastCount >= 0 && queue.Count > _lastCount;
             _lastCount = queue.Count;
@@ -185,11 +201,12 @@ namespace YargNetplay.UI
 
             int count = Mathf.Max(queue.Count, 1);
             while (_rows.Count < count) _rows.Add(NewRow());
-            for (int i = 0; i < _rows.Count; i++) _rows[i].gameObject.SetActive(i < count);
+            for (int i = 0; i < _rows.Count; i++) _rows[i].Root.gameObject.SetActive(i < count);
 
             if (queue.Count == 0)
             {
-                _rows[0].text = "<color=#9fb3c8><size=85%>Hold Green on a song to add it to the setlist for both players.</size></color>";
+                _rows[0].Show(false, false, false);
+                _rows[0].Text.text = "<color=#9fb3c8><size=85%>Hold Green on a song to add it to the setlist for both players.</size></color>";
             }
             else
             {
@@ -198,7 +215,8 @@ namespace YargNetplay.UI
                     var item = queue[i];
                     var (state, color) = QueueStatus.Describe(item, session.Transfer?.GetStatus(item.Hash), session.PeerName);
                     string by = item.AddedByMe ? "you" : session.PeerName;
-                    _rows[i].text =
+                    _rows[i].Show(Editing, Editing && i == _selected, Editing && i == _selected && _grabbed);
+                    _rows[i].Text.text =
                         $"<b>{i + 1}. <noparse>{item.Name}</noparse></b>  <color=#9fb3c8><noparse>{item.Artist}</noparse></color>\n" +
                         $"<size=78%><color=#9fb3c8>Added by <noparse>{by}</noparse></color>  <color={color}><noparse>{state}</noparse></color></size>";
                 }
@@ -209,12 +227,112 @@ namespace YargNetplay.UI
             float wanted = LayoutUtility.GetPreferredHeight(_content);
             _panel.sizeDelta = new Vector2(0, Mathf.Min(wanted, _bounds.rect.height));
 
-            // Show a newly added song straight away.
-            if (added)
+            // Show a newly added song straight away; while editing, keep the selected song in view.
+            if (added && !Editing)
             {
                 Canvas.ForceUpdateCanvases();
                 _scroll.verticalNormalizedPosition = 0f;
             }
+            else if (Editing && queue.Count > 0)
+            {
+                ScrollIntoView(_rows[_selected].Root);
+            }
+        }
+
+        private void ScrollIntoView(RectTransform row)
+        {
+            Canvas.ForceUpdateCanvases();
+            var viewport = _scroll.viewport;
+            var corners = new Vector3[4];
+            row.GetWorldCorners(corners);
+            float top = viewport.InverseTransformPoint(corners[1]).y, bottom = viewport.InverseTransformPoint(corners[0]).y;
+            float viewTop = viewport.rect.yMax, viewBottom = viewport.rect.yMin;
+
+            // The content moves up (positive y) to reveal rows further down.
+            var pos = _content.anchoredPosition;
+            if (top > viewTop) pos.y -= top - viewTop;
+            else if (bottom < viewBottom) pos.y += viewBottom - bottom;
+            else return;
+            float max = Mathf.Max(0, _content.rect.height - viewport.rect.height);
+            _content.anchoredPosition = new Vector2(pos.x, Mathf.Clamp(pos.y, 0, max));
+        }
+
+        // ------------------------------------------------------------ editing
+
+        /// <summary>
+        /// Edit mode puts the setlist's own controls on top of the library's: Up/Down pick a song, Green picks it up
+        /// so Up/Down move it, Yellow removes it, Red or Select finish. The mouse buttons on each row do the same.
+        /// </summary>
+        private void StartEditing()
+        {
+            if (Editing || Session.Current is not { IsConnected: true, Queue: { Count: > 0 } }) return;
+            Plugin.SetlistCollapsed.Value = false;
+            _grabbed = false;
+            _editScheme = new NavigationScheme(new()
+            {
+                new NavigationScheme.Entry(MenuAction.Up, "Menu.Common.Up", () => Step(-1)),
+                new NavigationScheme.Entry(MenuAction.Down, "Menu.Common.Down", () => Step(+1)),
+                new NavigationScheme.Entry(MenuAction.Green, "Move", () => { _grabbed = !_grabbed; Refresh(); }),
+                new NavigationScheme.Entry(MenuAction.Yellow, "Remove", () => RemoveAt(_selected)),
+                new NavigationScheme.Entry(MenuAction.Red, "Done", StopEditing),
+                new NavigationScheme.Entry(MenuAction.Select, "Done", StopEditing, hide: true),
+            }, false);
+            Navigator.Instance.PushScheme(_editScheme);
+            Refresh();
+        }
+
+        public void StopEditing()
+        {
+            if (_editScheme == null) return;
+            var scheme = _editScheme;
+            _editScheme = null;
+            _grabbed = false;
+            RemoveScheme(scheme);
+            if (_ui != null && _ui.activeInHierarchy) Refresh();
+        }
+
+        /// <summary>Pops our scheme even if something (a dialog) was pushed above it since.</summary>
+        private static void RemoveScheme(NavigationScheme scheme)
+        {
+            var navigator = Navigator.Instance;
+            if (navigator == null) return;
+            var stack = SchemeStack(navigator);
+            if (!stack.Contains(scheme)) return;
+
+            var above = new Stack<NavigationScheme>();
+            while (stack.Peek() != scheme) above.Push(stack.Pop());
+            navigator.PopScheme();
+            while (above.Count > 0) navigator.PushScheme(above.Pop());
+        }
+
+        private void Step(int delta)
+        {
+            int count = Session.Current?.Queue.Count ?? 0;
+            if (count == 0) return;
+            if (_grabbed)
+            {
+                if (Game.NativeSetlist.MoveShared(_selected, delta)) _selected += delta;
+            }
+            else
+            {
+                _selected = Mathf.Clamp(_selected + delta, 0, count - 1);
+            }
+            Refresh();
+        }
+
+        private void Move(int index, int delta)
+        {
+            if (Game.NativeSetlist.MoveShared(index, delta)) _selected = index + delta;
+            Refresh();
+        }
+
+        private void RemoveAt(int index)
+        {
+            var queue = Session.Current?.Queue;
+            if (queue == null || index < 0 || index >= queue.Count) return;
+            Game.NativeSetlist.RemoveShared(queue[index].Hash);
+            _grabbed = false;
+            Refresh();
         }
 
         /// <summary>The space between the top of the album panel (the top of the screen) and the cover, capped at a normal header.</summary>
@@ -230,8 +348,12 @@ namespace YargNetplay.UI
             return Mathf.Clamp(gap, 32f, HeaderHeight);
         }
 
+        private void OnEnable() => _instance = this;
+
         private void OnDisable()
         {
+            StopEditing();
+            if (_instance == this) _instance = null;
             ListShowing = false;
             HideFpsCounter(false);
         }
@@ -259,11 +381,86 @@ namespace YargNetplay.UI
 
         // ------------------------------------------------------------ widgets
 
-        private TMP_Text NewRow()
+        /// <summary>One setlist entry: its text, plus Up / Down / Remove buttons shown while editing.</summary>
+        private sealed class Row
         {
-            var text = NewText("Row", _content, 22, TextAlignmentOptions.TopLeft);
+            public RectTransform Root;
+            public Image Background;
+            public TMP_Text Text;
+            public GameObject Actions;
+
+            public void Show(bool editing, bool selected, bool grabbed)
+            {
+                Actions.SetActive(editing);
+                Background.color = grabbed ? new Color(0.55f, 0.42f, 0.05f, 0.75f)
+                    : selected ? new Color(0.16f, 0.32f, 0.6f, 0.75f)
+                    : Color.clear;
+            }
+        }
+
+        private Row NewRow()
+        {
+            int index = _rows.Count;
+            var root = NewChild("Row", _content);
+            var background = root.gameObject.AddComponent<Image>();
+            background.color = Color.clear;
+            root.gameObject.AddComponent<Button>().onClick.AddListener(() =>
+            {
+                if (!Editing) return;
+                _selected = index;
+                Refresh();
+            });
+            var layout = root.gameObject.AddComponent<HorizontalLayoutGroup>();
+            layout.padding = new RectOffset(6, 6, 4, 4);
+            layout.spacing = 6;
+            layout.childAlignment = TextAnchor.MiddleLeft;
+            layout.childControlWidth = layout.childControlHeight = true;
+            layout.childForceExpandWidth = layout.childForceExpandHeight = false;
+
+            var text = NewText("Text", root, 22, TextAlignmentOptions.TopLeft);
             text.textWrappingMode = TextWrappingModes.Normal;
             text.overflowMode = TextOverflowModes.Overflow;
+            text.gameObject.AddComponent<LayoutElement>().flexibleWidth = 1;
+
+            var actions = NewChild("Actions", root);
+            var actionsLayout = actions.gameObject.AddComponent<HorizontalLayoutGroup>();
+            actionsLayout.spacing = 4;
+            actionsLayout.childControlWidth = actionsLayout.childControlHeight = true;
+            actionsLayout.childForceExpandWidth = actionsLayout.childForceExpandHeight = false;
+            NewRowButton(actions, "\u25B2", () => Move(index, -1));
+            NewRowButton(actions, "\u25BC", () => Move(index, +1));
+            NewRowButton(actions, "X", () => RemoveAt(index));
+
+            return new Row { Root = root, Background = background, Text = text, Actions = actions.gameObject };
+        }
+
+        private void NewRowButton(Transform parent, string glyph, System.Action onClick)
+        {
+            var rect = NewChild("Button", parent);
+            var element = rect.gameObject.AddComponent<LayoutElement>();
+            element.preferredWidth = element.preferredHeight = 34;
+            rect.gameObject.AddComponent<Image>().color = new Color(1f, 1f, 1f, 0.12f);
+            rect.gameObject.AddComponent<Button>().onClick.AddListener(() => onClick());
+            var label = NewText("Glyph", rect, 18, TextAlignmentOptions.Center);
+            Stretch(label.rectTransform);
+            label.text = glyph;
+        }
+
+        /// <summary>A text button at the right of the header, <paramref name="right"/> from its right edge.</summary>
+        private TMP_Text NewHeaderButton(string name, float right, System.Action onClick)
+        {
+            var rect = NewChild(name, _header);
+            rect.anchorMin = new Vector2(1, 0);
+            rect.anchorMax = new Vector2(1, 1);
+            rect.pivot = new Vector2(1, 0.5f);
+            rect.sizeDelta = new Vector2(64, 0);
+            rect.anchoredPosition = new Vector2(-right, 0);
+            rect.gameObject.AddComponent<Image>().color = Color.clear; // click target
+            rect.gameObject.AddComponent<Button>().onClick.AddListener(() => onClick());
+
+            var text = NewText("Label", rect, 20, TextAlignmentOptions.MidlineRight);
+            Stretch(text.rectTransform);
+            text.fontStyle = FontStyles.Bold | FontStyles.UpperCase;
             return text;
         }
 
@@ -315,8 +512,26 @@ namespace YargNetplay.UI
                 if (__instance.MenuState == MenuState.Show || Session.Current is not { IsConnected: true }) return;
                 var stack = SchemeStack(Navigator.Instance);
                 if (stack.Count > 0)
-                    SchemeEntries(stack.Peek()).Add(new NavigationScheme.Entry(MenuAction.Select, "Setlist", ToggleCollapsed));
+                    SchemeEntries(stack.Peek()).Add(new NavigationScheme.Entry(MenuAction.Select, "Setlist (Hold: Edit)",
+                        ToggleCollapsed, onHoldHandler: () => _instance?.StartEditing(), holdSeconds: 0.5f));
             }
+        }
+
+        /// <summary>
+        /// The library rebuilds its controls by popping the top scheme, which would pop ours while editing.
+        /// Treat editing like an open popup: the rebuild waits until editing ends.
+        /// </summary>
+        [HarmonyPatch(typeof(MusicLibraryMenu), "IsNavigationSchemeBlocked")]
+        private static class SchemeBlockedPatch
+        {
+            private static void Postfix(ref bool __result) => __result |= Editing;
+        }
+
+        /// <summary>The library pops its scheme when it closes; take ours off first.</summary>
+        [HarmonyPatch(typeof(MusicLibraryMenu), "OnDisable")]
+        private static class LibraryDisablePatch
+        {
+            private static void Prefix() => _instance?.StopEditing();
         }
     }
 }

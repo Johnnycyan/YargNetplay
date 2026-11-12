@@ -7,6 +7,7 @@ Everything runs inside the game and uses YARG's own menus: an **Online** entry i
 
 - **Online page:** Main menu > Online opens a full-screen YARG page, built at runtime from YARG's own Profiles page (header, list, sidebar, buttons) and registered with YARG's menu manager, so Back and Escape work like any other page.
   - When not connected, it lists **saved servers** (Join or delete per row; rename with the ✎ icon), plus Host Game, Join Address and Add Server. Servers you join are saved automatically and named after the host's profile. They're stored in `BepInEx\config\yargnetplay-servers.json`.
+  - While hosting, **Copy IP** copies your public IP (looked up from api.ipify.org only when you press it) and **Copy LAN IP** copies this PC's address on your local network. The port is added only when it isn't the default. Players outside your network also need the port forwarded.
   - When hosting or connected, it lists the players with ping and Ready state. The joiner has a Ready button. The host's **Go to Song Select** unlocks once the joiner is ready and sends both players to Quickplay.
   - If the other player is already in song select (for example after one of you backed out to change your part), the page shows "in song select" and a **Go to Song Select** button that takes just you there, with no Ready needed.
   - **Preferred part:** pick the instrument and difficulty you plan to play. The instruments offered are the ones your profile's game mode can play, except co-op guitar; vocals aren't supported yet. While connected, the music library only lists songs that have charts for both players' parts (for example, Expert Drums and Medium Guitar). The library updates as soon as either player changes their part, and the player list shows each player's part.
@@ -19,6 +20,7 @@ Everything runs inside the game and uses YARG's own menus: an **Online** entry i
 - **Shared setlist:** both players browse YARG's own music library. A song either player adds to the native setlist (hold Play Song) is added to the other player's setlist too. Removing a song or clearing the setlist syncs the same way. Songs are matched by the chart hash YARG already computes (`SongEntry.Hash`).
 - **Setlist overlay:** while connected, the music library shows the shared setlist over the album art in the song info panel. It lists every song, who added it, and its sync state: Ready, Checking, Downloading or Sending with a percentage, missing, or a failed transfer with the reason.
   - The header bar sits just above the cover. The list covers the cover only while expanded and never grows past it, so nothing else on the page is covered. Long setlists scroll, and the list jumps to a newly added song.
+  - **Editing:** click **Edit** in the header, or hold **Select** on a controller. Each song gets ▲, ▼ and X buttons (move up, move down, remove). With a controller, Up/Down picks a song, Green picks it up so Up/Down move it, Yellow removes it, and Red or Select finish. Changes apply to both players' setlists, including songs still downloading. Moving songs in YARG's own setlist view (Left/Right) is shared too.
   - Click the header, or press **Select** on a controller (shown as Setlist in the help bar), to collapse it. Collapsed, only the header shows and the artwork is fully visible. The choice is remembered.
   - While the list is expanded, the "added a song" and "Downloaded" toasts are skipped, since the list already shows both. Failed transfers still show a toast.
   - YARG's FPS counter is hidden on this screen while the overlay is shown, since it sits in the same corner. It comes back when you leave.
@@ -27,11 +29,13 @@ Everything runs inside the game and uses YARG's own menus: an **Online** entry i
   - The mod holds it with a native "Waiting for … to be ready" dialog until both players are ready for the same song, and the players' setups (serialized `YargProfile` plus engine preset) are exchanged as they confirm.
   - This covers the first song, the setlist's Continue on the score screen, and score-screen restarts.
   - A second start gate holds `GameManager.Update` until both games are loaded, then opens at the same host-clock time on both machines.
-  - Song speed is fixed at 100%. Restart and skip in the pause menu are disabled online.
+  - YARG's song clock can still start late on one machine: it waits out lagging frames, up to a second, and the first frames of a song are often heavy while the venue loads. On the first running frame, each game measures how late its clock started against the agreed time and seeks forward by that amount, so both run on the same timeline. The BepInEx log shows the measured lateness, the timeline origin (it should match on both machines) and a clock check 10 s into each song.
+  - Song speed is fixed at 100%.
+  - **Restart and Skip** (pause and fail menus) change the song for both players. The other game shows a toast and follows, then both wait at the ready gate and start together as usual. Cancelling that wait leaves the song for both players.
   - **Leaving a song:** Back to Library (pause or fail menu) asks first, because it ends the song for both players. The dialog lists Stay (selected) above Leave Song for Up/Down navigation, and Back means Stay. On Leave Song, the other player's game leaves the song right away and returns to the music library with a toast, so both players stay on the same screen.
 - **Remote player:** added to `GameManager.YargPlayers` as a replay-style player (no bindings). Its engine is built through the game's own `CreateEngine` using the peer's engine preset. Each frame the mod feeds it the peer's inputs and updates it at `songTime - delay`. Its note pools are shifted by `delay * noteSpeed`, so notes reach the strike line when the delayed engine judges them. The scoring engine is deterministic, so this reproduces the peer's real result.
 - **Local player:** every input the local engine accepts (`BasePlayer.OnGameInput`) is sent to the peer.
-- **Scores:** the peer's score is never written to your score database. Saved replays include both players.
+- **Scores:** the peer's score card on the score screen is tagged like a live player (Full Combo or Cleared), not Replay, and never High Score. The peer's score is never written to your score database. Saved replays include both players.
 - **Song transfer:** when the peer queues a song you don't have, the mod asks for it automatically.
   - Loose song folders are packed into a `.sng` on the sender's side. Background videos are left out, since they can be hundreds of MB. Songs that are already `.sng` (or `.yargsong`) are sent as they are. Rock Band CON songs can't be sent yet.
   - Received songs are stored in their own folder, which is not a song folder. By default it's `%USERPROFILE%\AppData\LocalLow\YARC\YARG\NetplaySongs`, and it can be changed on the Online page (saved as `ReceivedSongsFolder` in the plugin config). If the chosen folder is unavailable at startup, for example on an unplugged drive, the default is used for that session. To keep a song, move its `.sng` into one of your song folders. To discard songs, delete them from that folder.
@@ -41,6 +45,20 @@ Everything runs inside the game and uses YARG's own menus: an **Online** entry i
   - Transfers pause while a song is being played, so they don't delay gameplay inputs.
 
 Every private member the mod touches is listed in `src/Game/Accessors.cs` and the patch targets in `src/Game/GameHooks.cs`. Check those first when a YARG update breaks the mod.
+
+## Install
+
+Download `YargNetplay-<version>.zip` and extract it.
+
+- **Windows:** double-click `Install YARG Netplay.bat`.
+- **Linux:** run `bash install.sh`.
+
+The installer finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\`. Run it again to update the mod.
+
+- **Native Linux YARG:** BepInEx starts through `run_bepinex.sh`, so the installer adds a "YARG (Netplay)" app shortcut. The YARC Launcher's Play button starts YARG without the mod.
+- **YARG.exe under Wine or Proton:** the Windows BepInEx is installed. Start YARG with `WINEDLLOVERRIDES="winhttp=n,b"`.
+
+Release builds (`dotnet build -c Release`) produce the zip in `dist\`.
 
 ## Build
 
@@ -53,7 +71,7 @@ dotnet build -c Release -p:YargDir="C:\path\to\YARG"
 
 If BepInEx is installed in that YARG folder, the build copies the plugin to `BepInEx\plugins\YargNetplay\` automatically.
 
-## Install BepInEx (once per YARG install)
+## Install BepInEx by hand (once per YARG install)
 
 1. Download BepInEx 5.4.x **win_x64** (Mono, not IL2CPP) from the BepInEx GitHub releases.
 2. Extract it into the folder that contains `YARG.exe`.
@@ -70,6 +88,8 @@ The YARC Launcher may remove extra files when it updates or verifies YARG. If so
 4. Add songs to the setlist, or pick one, and choose a difficulty. Both players confirm Ready.
 
 Both players must run the same YARG build and mod version. The window warns when the YARG versions differ.
+
+Two instances on one PC also share YARG's `currentSong.txt` (written for stream overlays when a song loads). Because netplay starts both loads at the same moment, the writes can collide. The mod skips a write that fails, so it can't break the song.
 
 Two instances on one PC share one library, so neither is ever missing a song. To test song transfer locally, start one instance with the environment variable `YARGNETPLAY_IGNORE_LIBRARY=1`. That instance then only "has" songs it has received.
 

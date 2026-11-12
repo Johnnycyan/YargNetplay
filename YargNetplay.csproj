@@ -3,6 +3,8 @@
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>YargNetplay</AssemblyName>
+    <!-- Keep in sync with Plugin.Version. -->
+    <Version>0.2.0</Version>
     <RootNamespace>YargNetplay</RootNamespace>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -45,6 +47,17 @@
 
   <Target Name="DeployToYarg" AfterTargets="Build" Condition="Exists('$(YargDir)\BepInEx\plugins')">
     <Copy SourceFiles="$(TargetPath);$(TargetDir)$(TargetName).pdb" DestinationFolder="$(YargDir)\BepInEx\plugins\YargNetplay" />
+  </Target>
+
+  <!-- Release builds also produce the installer zip: dist\YargNetplay-<version>.zip (installer + plugin). -->
+  <Target Name="PackageRelease" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <PackageDir>$(BaseIntermediateOutputPath)package\</PackageDir>
+    </PropertyGroup>
+    <RemoveDir Directories="$(PackageDir)" />
+    <Copy SourceFiles="$(TargetPath);installer\install.ps1;installer\Install YARG Netplay.bat;installer\install.sh" DestinationFolder="$(PackageDir)" />
+    <MakeDir Directories="dist" />
+    <ZipDirectory SourceDirectory="$(PackageDir)" DestinationFile="dist\YargNetplay-$(Version).zip" Overwrite="true" />
   </Target>
 
 </Project>

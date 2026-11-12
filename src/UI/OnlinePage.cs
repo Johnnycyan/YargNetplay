@@ -386,8 +386,8 @@ namespace YargNetplay.UI
                 case View.Hosting:
                     _sidebarTitle.text = $"Hosting on port {Plugin.Port.Value}";
                     _big.Set("Stop Hosting", () => session.Dispose(), color: cancel);
-                    _left.Hide();
-                    _right.Hide();
+                    _left.Set(_fetchingPublicIp ? "Finding IP..." : "Copy IP", CopyPublicAddress, enabled: !_fetchingPublicIp, color: secondary);
+                    _right.Set("Copy LAN IP", CopyLanAddress, color: secondary);
                     _primary = null;
                     break;
 
@@ -492,6 +492,45 @@ namespace YargNetplay.UI
                 out error);
             if (!ok) NetplayDialogs.ShowError(error);
             _folderField.text = ReceivedSongs.Folder;
+        }
+
+        // ------------------------------------------------------------ host address
+
+        private bool _fetchingPublicIp;
+
+        /// <summary>What the joiner types: the IP, plus the port only when it isn't the default.</summary>
+        private static string JoinAddress(string ip) =>
+            Plugin.Port.Value == Protocol.DefaultPort ? ip : $"{ip}:{Plugin.Port.Value}";
+
+        private static void CopyToClipboard(string address, string what)
+        {
+            GUIUtility.systemCopyBuffer = address;
+            Notify.Success($"Copied {what} {address}");
+        }
+
+        /// <summary>The address players outside your network join with. Looked up only when asked for.</summary>
+        private async void CopyPublicAddress()
+        {
+            _fetchingPublicIp = true;
+            try
+            {
+                string ip = await HostAddress.GetPublicIpAsync();
+                CopyToClipboard(JoinAddress(ip), "your public IP");
+                Notify.Info($"Players outside your network also need port {Plugin.Port.Value} (TCP) forwarded to this PC.");
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("Public IP lookup failed: " + e.Message);
+                NetplayDialogs.ShowError("Couldn't look up your public IP. Check your internet connection, or use Copy LAN IP for players on your network.");
+            }
+            finally { _fetchingPublicIp = false; }
+        }
+
+        private static void CopyLanAddress()
+        {
+            string ip = HostAddress.GetLanIp();
+            if (ip == null) NetplayDialogs.ShowError("Couldn't find this PC's address on your local network.");
+            else CopyToClipboard(JoinAddress(ip), "your LAN IP");
         }
 
         private static void ToggleReady()

@@ -9,7 +9,7 @@ namespace YargNetplay.Net
     /// </summary>
     internal static class Protocol
     {
-        public const int Version = 7;
+        public const int Version = 8;
         public const int DefaultPort = 47820;
         public const int MaxFrameBytes = 16 * 1024 * 1024;
     }
@@ -93,6 +93,15 @@ namespace YargNetplay.Net
 
         /// <summary>bool. Whether the sender is in song select (music library or difficulty select).</summary>
         SongSelectState,
+
+        /// <summary>int count, count x byte[20] hash. The sender reordered the shared setlist; this is the whole new order.</summary>
+        QueueOrder,
+
+        /// <summary>
+        /// int showIndex, byte[20] hash, bool skip. Sender restarted the song or skipped to the next setlist song from
+        /// the pause menu; the receiver does the same. Both then meet at the ready gate for that song.
+        /// </summary>
+        ChangeSong,
     }
 
     internal static class BinaryExtensions
