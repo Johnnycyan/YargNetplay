@@ -89,17 +89,17 @@ namespace YargNetplay.Game
                 if (session == null || GameManager == null) return true;
                 if (session.ChangingSong) return false; // already restarting or skipping
 
-                var state = GlobalVariables.State;
                 bool skip = __originalMethod.Name == nameof(PauseMenuManager.Skip);
                 if (skip)
                 {
                     // YARG only offers Skip with a next song (and would index past the end otherwise).
-                    if (!state.PlayingAShow || state.ShowIndex >= state.ShowSongs.Count - 1) return false;
-                    session.BeginSongChange(state.ShowSongs[state.ShowIndex + 1], state.ShowIndex + 1, skip: true);
+                    var songs = Show.Songs;
+                    if (!Show.Playing || Show.Index >= songs.Count - 1) return false;
+                    session.BeginSongChange(songs[Show.Index + 1], Show.Index + 1, skip: true);
                 }
                 else
                 {
-                    session.BeginSongChange(state.CurrentSong, state.ShowIndex, skip: false);
+                    session.BeginSongChange(GlobalVariables.State.CurrentSong, Show.Index, skip: false);
                 }
                 return true;
             }

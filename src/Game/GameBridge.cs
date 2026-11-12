@@ -157,8 +157,7 @@ namespace YargNetplay.Game
 
             // Engine parameters are filled in when the gameplay player creates its engine (see CreateEnginePatch).
             var frame = new ReplayFrame(profile, null, null, Array.Empty<GameInput>());
-            var replay = new ReplayData(new(), new(), new[] { frame }, Array.Empty<double>());
-            var player = new YargPlayer(frame, replay);
+            var player = new YargPlayer(frame, NewReplayData(frame));
 
             try
             {
@@ -171,6 +170,22 @@ namespace YargNetplay.Game
             }
 
             return player;
+        }
+
+        /// <summary>
+        /// Replay data holding just this frame. ReplayData's constructor differs between YARG builds (newer ones added
+        /// rock meter presets and a no-fail flag), so fill whichever one this build has: empty preset dictionaries,
+        /// defaults for flags, no frame times.
+        /// </summary>
+        private static ReplayData NewReplayData(ReplayFrame frame)
+        {
+            var ctor = typeof(ReplayData).GetConstructors()
+                .First(c => c.GetParameters().Any(p => p.ParameterType == typeof(ReplayFrame[])));
+            var args = ctor.GetParameters().Select(p =>
+                p.ParameterType == typeof(ReplayFrame[]) ? new[] { frame } :
+                p.ParameterType == typeof(double[]) ? Array.Empty<double>() :
+                Activator.CreateInstance(p.ParameterType)).ToArray();
+            return (ReplayData) ctor.Invoke(args);
         }
     }
 

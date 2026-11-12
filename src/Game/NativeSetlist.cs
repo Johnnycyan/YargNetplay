@@ -203,5 +203,24 @@ namespace YargNetplay.Game
         {
             private static void Postfix(MusicLibraryMenu __instance) => Resync(__instance);
         }
+
+#if YARG_STATIC_SETLIST
+        /// <summary>
+        /// YARG's setlist outlives the library menu now, and YARG empties it each time the menu scene loads. That's
+        /// YARG starting over locally, like the old fresh library menu, not this player clearing the shared setlist:
+        /// don't share it. The library's OnEnable then refills it from the shared setlist (Resync).
+        /// </summary>
+        [HarmonyPatch(typeof(Setlist), nameof(Setlist.Reset))]
+        private static class SetlistResetPatch
+        {
+            private static void Prefix(out bool __state)
+            {
+                __state = _applying;
+                _applying = true;
+            }
+
+            private static void Finalizer(bool __state) => _applying = __state;
+        }
+#endif
     }
 }

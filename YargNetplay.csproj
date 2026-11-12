@@ -19,6 +19,11 @@
          Override with: dotnet build -p:YargDir="C:\path\to\YARG" -->
     <YargDir Condition="'$(YargDir)' == ''">$(LOCALAPPDATA)\YARC\YARG Installs\cd3bd653-c9f2-420e-a575-5a1ef115cdda\installation</YargDir>
     <YargManaged>$(YargDir)\YARG_Data\Managed</YargManaged>
+
+    <!-- Newer nightlies (b4161 on) play setlists through the static YARG.Playlists.Setlist instead of PersistentState's
+         ShowSongs/ShowIndex (see src/Game/Show.cs). Detected from the game assembly; override with -p:YargStaticSetlist=true|false -->
+    <YargStaticSetlist Condition="'$(YargStaticSetlist)' == '' And Exists('$(YargManaged)\Assembly-CSharp.dll')">$([System.IO.File]::ReadAllText('$(YargManaged)\Assembly-CSharp.dll').Contains('ResolveSongs'))</YargStaticSetlist>
+    <DefineConstants Condition="'$(YargStaticSetlist)' == 'true'">$(DefineConstants);YARG_STATIC_SETLIST</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
