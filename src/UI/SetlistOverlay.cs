@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using HarmonyLib;
 using TMPro;
 using UnityEngine;
@@ -188,7 +189,8 @@ namespace YargNetplay.UI
             if (queue.Count == 0) StopEditing();
             bool collapsed = Plugin.SetlistCollapsed.Value;
             _header.sizeDelta = new Vector2(0, HeaderHeightAboveCover());
-            _title.text = $"Setlist  <size=75%><color=#9fb3c8>{queue.Count} song{(queue.Count == 1 ? "" : "s")}</color></size>";
+            string total = queue.Count > 0 ? $" ({FormatLength(queue.Sum(q => q.LengthMilliseconds))})" : "";
+            _title.text = $"Setlist  <size=75%><color=#9fb3c8>{queue.Count} song{(queue.Count == 1 ? "" : "s")}{total}</color></size>";
             _toggle.text = $"<color=#9fb3c8>{(collapsed ? "Show" : "Hide")}</color>";
             _edit.text = Editing ? "<color=#ffd34d>Done</color>" : "<color=#9fb3c8>Edit</color>";
             _edit.transform.parent.gameObject.SetActive(queue.Count > 0);
@@ -336,6 +338,13 @@ namespace YargNetplay.UI
             Game.NativeSetlist.RemoveShared(queue[index].Hash);
             _grabbed = false;
             Refresh();
+        }
+
+        /// <summary>m:ss, or h:mm:ss from an hour up.</summary>
+        private static string FormatLength(long milliseconds)
+        {
+            var time = System.TimeSpan.FromMilliseconds(milliseconds);
+            return time.TotalHours >= 1 ? $"{(int) time.TotalHours}:{time:mm\\:ss}" : $"{time.Minutes}:{time:ss}";
         }
 
         /// <summary>The cover's height and position, the side panel's full width.</summary>

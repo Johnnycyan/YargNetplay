@@ -9,7 +9,7 @@ namespace YargNetplay.Net
     /// </summary>
     internal static class Protocol
     {
-        public const int Version = 8;
+        public const int Version = 9;
         public const int DefaultPort = 47820;
         public const int MaxFrameBytes = 16 * 1024 * 1024;
     }
@@ -25,7 +25,7 @@ namespace YargNetplay.Net
         /// <summary>double echoedTime, double responderLocalTime</summary>
         Pong,
 
-        /// <summary>byte[20] hash, string name, string artist</summary>
+        /// <summary>byte[20] hash, string name, string artist, long lengthMilliseconds</summary>
         QueueAdd,
 
         /// <summary>byte[20] hash</summary>

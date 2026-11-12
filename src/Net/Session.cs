@@ -31,6 +31,7 @@ namespace YargNetplay.Net
         public byte[] Hash;
         public string Name;
         public string Artist;
+        public long LengthMilliseconds;
         public bool LocalHas;
         public bool? PeerHas; // null = waiting for the peer's answer
         public bool AddedByMe;
@@ -404,11 +405,12 @@ namespace YargNetplay.Net
                     var hash = r.ReadHash();
                     string name = r.ReadString();
                     string artist = r.ReadString();
+                    long length = r.ReadInt64();
 
                     var item = FindQueueItem(hash);
                     if (item == null)
                     {
-                        item = new QueueItem { Hash = hash, Name = name, Artist = artist };
+                        item = new QueueItem { Hash = hash, Name = name, Artist = artist, LengthMilliseconds = length };
                         Queue.Add(item);
                     }
                     item.PeerHas = true;
@@ -625,6 +627,7 @@ namespace YargNetplay.Net
                 Hash = hash,
                 Name = song.Name.Original,
                 Artist = song.Artist.Original,
+                LengthMilliseconds = song.SongLengthMilliseconds,
                 LocalHas = true,
                 AddedByMe = true,
             };
@@ -708,6 +711,7 @@ namespace YargNetplay.Net
                 w.WriteHash(item.Hash);
                 w.Write(item.Name ?? "");
                 w.Write(item.Artist ?? "");
+                w.Write(item.LengthMilliseconds);
             });
         }
 
