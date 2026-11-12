@@ -803,9 +803,9 @@ namespace YargNetplay.Net
                 Notify.Info("Song speed is fixed at 100% online.");
             }
 
-            // The score screen's Continue advances ShowIndex before loading; undo that if we end up cancelling,
+            // The score screen's Continue advances the show before loading; undo that if we end up cancelling,
             // or pressing Continue again would skip a song.
-            _undoShowAdvanceOnCancel = GlobalVariables.State.PlayingAShow
+            _undoShowAdvanceOnCancel = Show.Playing
                 && SceneManager.GetActiveScene().buildIndex == (int) SceneIndex.Score;
 
             _localReadyHash = song.Hash.HashBytes;
@@ -838,10 +838,10 @@ namespace YargNetplay.Net
             _conn?.Send(MsgType.Unready);
             NetplayDialogs.CloseWaiting();
 
-            if (_undoShowAdvanceOnCancel && GlobalVariables.State.ShowIndex > 0)
+            if (_undoShowAdvanceOnCancel && Show.Index > 0)
             {
-                GlobalVariables.State.ShowIndex--;
-                GlobalVariables.State.CurrentSong = GlobalVariables.State.ShowSongs[GlobalVariables.State.ShowIndex];
+                Show.Index--;
+                GlobalVariables.State.CurrentSong = Show.Songs[Show.Index];
             }
             _undoShowAdvanceOnCancel = false;
         }
@@ -864,7 +864,7 @@ namespace YargNetplay.Net
             // A setlist has really started once its first song loads (not when difficulty select opens, which
             // can be backed out of). The next setlist is built from scratch, like in single player: the menu
             // scene's own setlist comes back empty too.
-            if (GlobalVariables.State.PlayingAShow && GlobalVariables.State.ShowIndex == 0) Queue.Clear();
+            if (Show.Playing && Show.Index == 0) Queue.Clear();
 
             // Both ready for the same song: this setup drives the remote player for this song.
             _replacingSong = GameHooks.GameManager != null; // a restart or skip: the old scene unloads after this
@@ -947,9 +947,8 @@ namespace YargNetplay.Net
                 return;
             }
 
-            // PersistentState is a struct: write through GlobalVariables.State, not a copy.
-            if (GlobalVariables.State.PlayingAShow && showIndex >= 0 && showIndex < GlobalVariables.State.ShowSongs.Count)
-                GlobalVariables.State.ShowIndex = showIndex;
+            if (Show.Playing && showIndex >= 0 && showIndex < Show.Songs.Count)
+                Show.Index = showIndex;
             GlobalVariables.State.CurrentSong = song;
             ChangingSong = true;
 

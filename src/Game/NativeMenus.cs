@@ -52,9 +52,7 @@ namespace YargNetplay.Game
             GlobalVariables.State.CurrentReplay = null;
             GlobalVariables.State.PlayingWithReplay = false;
             GlobalVariables.State.IsPractice = false;
-            GlobalVariables.State.PlayingAShow = show;
-            GlobalVariables.State.ShowSongs = songs;
-            GlobalVariables.State.ShowIndex = 0;
+            Show.Begin(songs, show);
             GlobalVariables.State.CurrentSong = songs[0];
 
             Following = true;
@@ -133,10 +131,10 @@ namespace YargNetplay.Game
                 var state = GlobalVariables.State;
                 if (session is not { IsConnected: true } || state.IsPractice || state.CurrentSong == null) return;
 
-                var songs = state.PlayingAShow && state.ShowSongs is { Count: > 0 }
-                    ? state.ShowSongs
+                var songs = Show.Playing && Show.Songs is { Count: > 0 } showSongs
+                    ? showSongs
                     : new List<SongEntry> { state.CurrentSong };
-                session.SendOpenSetlist(songs, state.PlayingAShow);
+                session.SendOpenSetlist(songs, Show.Playing);
             }
         }
     }
