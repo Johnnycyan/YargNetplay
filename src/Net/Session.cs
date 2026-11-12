@@ -491,7 +491,9 @@ namespace YargNetplay.Net
                     break;
 
                 case MsgType.LeaveSong:
-                    Notify.Warning($"{PeerName} quit the song");
+                    Notify.Warning(GameHooks.ApplyRemoteLeave()
+                        ? $"{PeerName} left the song. Back to the library."
+                        : $"{PeerName} left the song");
                     break;
 
                 case MsgType.LobbyReady:

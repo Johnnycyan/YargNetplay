@@ -21,6 +21,7 @@ namespace YargNetplay.Game
         public static YargPlayer LocalPlayer { get; private set; }
 
         private static bool _applyingRemotePause;
+        private static bool _applyingRemoteLeave;
 
         public static Session ActiveSession =>
             Session.Current is { InSongFlow: true, ActivePeerSetup: not null } s ? s : null;
@@ -211,10 +212,45 @@ namespace YargNetplay.Game
             }
         }
 
+        /// <summary>
+        /// Back to Library (pause and fail menus) asks first online. Leaving ends the song for both players,
+        /// so they stay on the same screen.
+        /// </summary>
+        [HarmonyPatch(typeof(PauseMenuManager), nameof(PauseMenuManager.Quit))]
+        private static class QuitPatch
+        {
+            private static bool Prefix()
+            {
+                var session = ActiveSession;
+                if (session == null || GameManager == null) return true;
+
+                UI.NetplayDialogs.ConfirmLeaveSong(session.PeerName, () =>
+                {
+                    if (GameManager != null) GameManager.ForceQuitSong();
+                });
+                return false;
+            }
+        }
+
         [HarmonyPatch(typeof(GameManager), nameof(GameManager.ForceQuitSong))]
         private static class ForceQuitPatch
         {
-            private static void Prefix() => ActiveSession?.SendLeaveSong();
+            private static void Prefix()
+            {
+                if (!_applyingRemoteLeave) ActiveSession?.SendLeaveSong();
+            }
+        }
+
+        /// <summary>The other player left the song: leave it too, without telling them back. False when not in a song.</summary>
+        public static bool ApplyRemoteLeave()
+        {
+            UI.NetplayDialogs.CloseLeaveConfirm();
+            if (GameManager == null) return false;
+
+            _applyingRemoteLeave = true;
+            try { GameManager.ForceQuitSong(); }
+            finally { _applyingRemoteLeave = false; }
+            return true;
         }
 
         /// <summary>Never write the peer's score into this machine's score database.</summary>

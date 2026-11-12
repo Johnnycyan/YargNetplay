@@ -19,6 +19,7 @@ Everything runs inside the game and uses YARG's own menus: an **Online** entry i
   - This covers the first song, the setlist's Continue on the score screen, and score-screen restarts.
   - A second start gate holds `GameManager.Update` until both games are loaded, then opens at the same host-clock time on both machines.
   - Song speed is fixed at 100%. Restart and skip in the pause menu are disabled online.
+  - **Leaving a song:** Back to Library (pause or fail menu) asks first, because it ends the song for both players. The dialog lists Stay (selected) above Leave Song for Up/Down navigation, and Back means Stay. On Leave Song, the other player's game leaves the song right away and returns to the music library with a toast, so both players stay on the same screen.
 - **Remote player:** added to `GameManager.YargPlayers` as a replay-style player (no bindings). Its engine is built through the game's own `CreateEngine` using the peer's engine preset. Each frame the mod feeds it the peer's inputs and updates it at `songTime - delay`. Its note pools are shifted by `delay * noteSpeed`, so notes reach the strike line when the delayed engine judges them. The scoring engine is deterministic, so this reproduces the peer's real result.
 - **Local player:** every input the local engine accepts (`BasePlayer.OnGameInput`) is sent to the peer.
 - **Scores:** the peer's score is never written to your score database. Saved replays include both players.

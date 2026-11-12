@@ -46,6 +46,14 @@ namespace YargNetplay.UI
             Plugin.Log.LogInfo("Menu hierarchy written to " + path);
         }
 
+        /// <summary>Dumps one object (e.g. a dialog) to BepInEx/&lt;fileName&gt;.</summary>
+        public static void DumpObject(Transform root, string fileName)
+        {
+            var sb = new StringBuilder();
+            Dump(root, 0, sb, 10);
+            File.WriteAllText(Path.Combine(Paths.BepInExRootPath, fileName), sb.ToString());
+        }
+
         private static void Dump(Transform t, int depth, StringBuilder sb, int maxDepth)
         {
             var rt = t as RectTransform;
@@ -57,6 +65,10 @@ namespace YargNetplay.UI
                 .Select(c => c.GetType().Name));
             var text = t.GetComponent<TMPro.TMP_Text>();
             string label = text != null ? $" text=\"{text.text?.Replace("\n", " ")}\"" : "";
+            if (t.GetComponent<UnityEngine.UI.HorizontalOrVerticalLayoutGroup>() is { } group)
+                label += $" layout(spacing={group.spacing} pad={group.padding} ctrlW={group.childControlWidth} ctrlH={group.childControlHeight} expW={group.childForceExpandWidth} expH={group.childForceExpandHeight})";
+            if (t.GetComponent<UnityEngine.UI.LayoutElement>() is { } element)
+                label += $" element(min={element.minWidth}x{element.minHeight} pref={element.preferredWidth}x{element.preferredHeight} flex={element.flexibleWidth}x{element.flexibleHeight})";
             sb.AppendLine($"{new string(' ', depth * 2)}{t.name}{(t.gameObject.activeSelf ? "" : " [inactive]")} [{comps}]{rect}{label}");
             if (depth >= maxDepth) return;
             foreach (Transform child in t) Dump(child, depth + 1, sb, maxDepth);
