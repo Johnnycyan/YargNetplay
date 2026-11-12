@@ -45,6 +45,8 @@ namespace YargNetplay.UI
         private TMP_Text _sidebarTitle;
         private GameObject _editButton;
         private TMP_InputField _delayField;
+        private TMP_Text _delayLabel;
+        private Toggle _autoDelayToggle;
         private ColoredButtonRef _big, _left, _right;
         private TMP_Text _folderLabel;
         private TMP_InputField _folderField;
@@ -129,13 +131,19 @@ namespace YargNetplay.UI
             if (picture != null) picture.gameObject.SetActive(false);
 
             var options = sidebar.Find("ScrollView/Viewport/Content");
-            foreach (Transform option in options) option.gameObject.SetActive(option.name == "Input Calibration");
+            foreach (Transform option in options) option.gameObject.SetActive(option.name is "Input Calibration" or "Lefty Flip");
 
             var delayRow = options.Find("Input Calibration");
+            var autoRow = options.Find("Lefty Flip");
+            delayRow.SetSiblingIndex(autoRow.GetSiblingIndex() + 1); // auto toggle, then the delay it controls
+            autoRow.Find("Option Name").GetComponent<TMP_Text>().text = "AUTO DELAY";
+            _autoDelayToggle = autoRow.Find("Toggle/Toggle").GetComponent<Toggle>();
+            _autoDelayToggle.onValueChanged.AddListener(on => Plugin.AutoDelay.Value = on);
             var buttons = sidebar.Find("Buttons");
             BuildFolderRows(options, delayRow, buttons);
 
-            delayRow.Find("Option Name").GetComponent<TMP_Text>().text = "REMOTE PLAYER DELAY";
+            _delayLabel = delayRow.Find("Option Name").GetComponent<TMP_Text>();
+            _delayLabel.richText = true;
             _delayField = delayRow.Find("InputField/Field").GetComponent<TMP_InputField>();
             _delayField.contentType = TMP_InputField.ContentType.IntegerNumber;
             if (_delayField.placeholder is TMP_Text placeholder) placeholder.text = "Delay (ms)...";
@@ -193,7 +201,6 @@ namespace YargNetplay.UI
                 new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", Back),
             }, true));
 
-            _delayField.text = Plugin.RemoteDelayMs.Value.ToString();
             Refresh(force: true);
         }
 
@@ -299,7 +306,7 @@ namespace YargNetplay.UI
             Color secondary = colors.DarkButton, cancel = colors.CancelButton;
 
             _editButton.SetActive(view == View.Idle && _selectedServer != null);
-            _delayField.interactable = session is not { InSongFlow: true };
+            UpdateDelayRows(session);
             UpdateFolderRows(session, secondary);
 
             switch (view)
@@ -344,6 +351,34 @@ namespace YargNetplay.UI
                     _primary = ToggleReady;
                     break;
             }
+        }
+
+        /// <summary>
+        /// Auto on: the field shows the delay the next song will use (measured from ping) and can't be edited.
+        /// Auto off: the field is the fixed delay. Neither can change while a song is loading or playing.
+        /// </summary>
+        private void UpdateDelayRows(Session session)
+        {
+            bool auto = Plugin.AutoDelay.Value;
+            bool editable = session is not { InSongFlow: true };
+
+            _autoDelayToggle.interactable = editable;
+            if (_autoDelayToggle.isOn != auto) _autoDelayToggle.SetIsOnWithoutNotify(auto);
+
+            _delayField.interactable = editable && !auto;
+            if (_delayField.placeholder is TMP_Text placeholder)
+                placeholder.text = auto ? "Measured when connected" : "Delay (ms)...";
+            if (!_delayField.isFocused)
+            {
+                string text = !auto ? Plugin.RemoteDelayMs.Value.ToString()
+                    : session is { IsConnected: true } ? $"{session.RemoteDelaySeconds * 1000:0}"
+                    : "";
+                if (_delayField.text != text) _delayField.text = text;
+            }
+
+            string detail = auto ? "From ping" : "Fixed, in ms";
+            string label = $"REMOTE PLAYER DELAY\n<size=70%><color=#9fb3c8>{detail}</color></size>";
+            if (_delayLabel.text != label) _delayLabel.text = label;
         }
 
         private void UpdateFolderRows(Session session, Color color)
@@ -397,7 +432,6 @@ namespace YargNetplay.UI
             ms = Mathf.Clamp(ms, 30, 1000);
             Plugin.RemoteDelayMs.Value = ms;
             _delayField.text = ms.ToString();
-            if (Session.Current is { InSongFlow: false } s) s.RemoteDelaySeconds = ms / 1000.0;
         }
 
         private void PromptAddServer() =>

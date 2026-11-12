@@ -15,11 +15,39 @@ namespace YargNetplay.Game
     {
         private static readonly HashSet<int> Shifted = new();
         private static double _delay;
+        private static double _lastEngineTime;
+        private static int _inputs, _lateInputs;
+        private static double _worstLateness;
+        private static bool _active;
 
         public static void BeginSong(double delay)
         {
             _delay = delay;
             Shifted.Clear();
+            _lastEngineTime = double.NegativeInfinity;
+            _inputs = _lateInputs = 0;
+            _worstLateness = 0;
+            _active = true;
+            Plugin.Log.LogInfo($"Remote player delay for this song: {delay * 1000:0} ms");
+        }
+
+        /// <summary>
+        /// Called when the gameplay scene ends. Inputs that arrive after the delayed engine already passed their
+        /// time are judged late, so a non-zero count means the delay was too short for this connection.
+        /// </summary>
+        public static void EndSong(string peerName)
+        {
+            if (!_active) return;
+            _active = false;
+
+            Plugin.Log.LogInfo($"Remote inputs: {_inputs} received, {_lateInputs} late (worst {_worstLateness * 1000:0} ms) " +
+                $"with a {_delay * 1000:0} ms delay");
+            if (_lateInputs == 0) return;
+
+            string advice = Plugin.AutoDelay.Value
+                ? "The connection had a lag spike bigger than recent pings."
+                : "Raise the remote player delay on the Online page or turn on Auto delay.";
+            UI.Notify.Warning($"{_lateInputs} of {peerName}'s inputs arrived late (up to {_worstLateness * 1000:0} ms). {advice}");
         }
 
         public static void Update(BasePlayer player, GameManager gm, Session session)
@@ -36,12 +64,19 @@ namespace YargNetplay.Game
 
                 while (session.RemoteInputs.TryDequeueUpTo(time, out var input))
                 {
+                    _inputs++;
+                    if (input.Time < _lastEngineTime)
+                    {
+                        _lateInputs++;
+                        _worstLateness = System.Math.Max(_worstLateness, _lastEngineTime - input.Time);
+                    }
                     engine.QueueInput(ref input);
                     Accessors.OnInputQueued(player, input);
                     log.Add(input); // keeps the remote player in the saved replay
                 }
 
                 engine.Update(time);
+                _lastEngineTime = time;
             }
 
             Accessors.UpdateVisuals(player, gm.VisualTime - _delay);

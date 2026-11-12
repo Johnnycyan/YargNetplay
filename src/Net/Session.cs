@@ -58,6 +58,9 @@ namespace YargNetplay.Net
         private const double PING_INTERVAL = 1.0;
         private const double START_LEAD_TIME = 0.75;
         private const int CLOCK_SAMPLES = 16;
+        private const int RTT_HISTORY = 30;
+        private const double AUTO_DELAY_MARGIN = 0.040;
+        private const double AUTO_DELAY_MIN_MS = 50, AUTO_DELAY_MAX_MS = 1000;
 
         private static readonly double TicksToSeconds = 1.0 / Stopwatch.Frequency;
 
@@ -68,6 +71,7 @@ namespace YargNetplay.Net
         private string _pendingError;
         private double _nextPing;
         private readonly List<(double rtt, double offset)> _clockSamples = new();
+        private readonly Queue<double> _rttHistory = new();
 
         public bool IsHost { get; private set; }
 
@@ -83,8 +87,22 @@ namespace YargNetplay.Net
         public string PeerName { get; private set; } = "your partner";
         public double RttSeconds { get; private set; }
 
-        /// <summary>How far behind the shared song clock the remote player is simulated.</summary>
-        public double RemoteDelaySeconds { get; set; } = Plugin.RemoteDelayMs.Value / 1000.0;
+        /// <summary>
+        /// Delay picked from the network: half the worst round trip of the last <see cref="RTT_HISTORY"/> pings
+        /// (one second apart), plus a margin for frame timing and jitter, rounded up to 10 ms.
+        /// </summary>
+        public double AutoDelaySeconds
+        {
+            get
+            {
+                double worstRtt = _rttHistory.Count > 0 ? _rttHistory.Max() : RttSeconds;
+                double ms = Math.Ceiling((worstRtt / 2 + AUTO_DELAY_MARGIN) * 100) * 10;
+                return Math.Max(AUTO_DELAY_MIN_MS, Math.Min(AUTO_DELAY_MAX_MS, ms)) / 1000.0;
+            }
+        }
+
+        /// <summary>How far behind the shared song clock the remote player is simulated. Fixed for each song when it loads.</summary>
+        public double RemoteDelaySeconds => Plugin.AutoDelay.Value ? AutoDelaySeconds : Plugin.RemoteDelayMs.Value / 1000.0;
 
         /// <summary>The shared setlist. Mirrored into YARG's own setlist by <see cref="NativeSetlist"/>.</summary>
         public List<QueueItem> Queue { get; } = new();
@@ -334,6 +352,8 @@ namespace YargNetplay.Net
 
                     _clockSamples.Add((rtt, peerTime - (sent + rtt / 2)));
                     if (_clockSamples.Count > CLOCK_SAMPLES) _clockSamples.RemoveAt(0);
+                    _rttHistory.Enqueue(rtt);
+                    if (_rttHistory.Count > RTT_HISTORY) _rttHistory.Dequeue();
 
                     // The lowest-RTT sample has the least queuing noise.
                     var best = _clockSamples.OrderBy(s => s.rtt).First();

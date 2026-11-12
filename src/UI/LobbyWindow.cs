@@ -97,7 +97,9 @@ namespace YargNetplay.UI
                 GUI.enabled = !session.InSongFlow;
                 GUILayout.BeginHorizontal();
                 GUILayout.Label($"Remote player delay: {session.RemoteDelaySeconds * 1000:0} ms", GUILayout.Width(210));
-                session.RemoteDelaySeconds = Math.Round(GUILayout.HorizontalSlider((float) session.RemoteDelaySeconds, 0.05f, 0.5f) / 0.01) * 0.01;
+                Plugin.AutoDelay.Value = GUILayout.Toggle(Plugin.AutoDelay.Value, "Auto", GUILayout.Width(60));
+                if (!Plugin.AutoDelay.Value)
+                    Plugin.RemoteDelayMs.Value = (int) Math.Round(GUILayout.HorizontalSlider(Plugin.RemoteDelayMs.Value, 30f, 500f) / 10) * 10;
                 GUILayout.EndHorizontal();
                 GUI.enabled = true;
             }
