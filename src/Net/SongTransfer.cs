@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using YARG.Core.Song;
 using YargNetplay.Game;
@@ -55,6 +56,9 @@ namespace YargNetplay.Net
         public static string Key(byte[] hash) => BitConverter.ToString(hash).Replace("-", "");
 
         public TransferStatus GetStatus(byte[] hash) => Status.TryGetValue(Key(hash), out var s) ? s : null;
+
+        /// <summary>True while any song is being requested, sent or received.</summary>
+        public bool Active => Status.Values.Any(s => !s.Done && s.Error == null);
 
         // ------------------------------------------------------------ requesting (receiver side, main thread)
 

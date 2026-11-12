@@ -6,6 +6,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 using YARG.Core.Input;
+using YARG.Helpers;
 using YARG.Localization;
 using YARG.Menu;
 using YARG.Menu.Data;
@@ -45,6 +46,9 @@ namespace YargNetplay.UI
         private GameObject _editButton;
         private TMP_InputField _delayField;
         private ColoredButtonRef _big, _left, _right;
+        private TMP_Text _folderLabel;
+        private TMP_InputField _folderField;
+        private ColoredButtonRef _changeFolder, _openFolder;
 
         private readonly List<(OnlineRow Row, TMP_Text Text, Func<string> Label)> _rows = new();
         private string _signature;
@@ -128,16 +132,53 @@ namespace YargNetplay.UI
             foreach (Transform option in options) option.gameObject.SetActive(option.name == "Input Calibration");
 
             var delayRow = options.Find("Input Calibration");
+            var buttons = sidebar.Find("Buttons");
+            BuildFolderRows(options, delayRow, buttons);
+
             delayRow.Find("Option Name").GetComponent<TMP_Text>().text = "REMOTE PLAYER DELAY";
             _delayField = delayRow.Find("InputField/Field").GetComponent<TMP_InputField>();
             _delayField.contentType = TMP_InputField.ContentType.IntegerNumber;
             if (_delayField.placeholder is TMP_Text placeholder) placeholder.text = "Delay (ms)...";
             _delayField.onEndEdit.AddListener(OnDelayEdited);
 
-            var buttons = sidebar.Find("Buttons");
             _big = new ColoredButtonRef(buttons.Find("Edit Profile"));
             _left = new ColoredButtonRef(buttons.Find("Add New Device"));
             _right = new ColoredButtonRef(buttons.Find("Remove Device"));
+        }
+
+        /// <summary>
+        /// The received-songs folder: a copy of the delay row showing the path (editable), and a row with two of
+        /// the sidebar's half-width buttons (Change Folder opens YARG's own folder picker, Open Folder opens Explorer).
+        /// </summary>
+        private void BuildFolderRows(Transform options, Transform template, Transform buttons)
+        {
+            var folderRow = Instantiate(template.gameObject, options).transform;
+            folderRow.name = "Received Songs Folder";
+            folderRow.SetSiblingIndex(template.GetSiblingIndex() + 1);
+            _folderLabel = folderRow.Find("Option Name").GetComponent<TMP_Text>();
+            _folderLabel.richText = true;
+            _folderField = folderRow.Find("InputField/Field").GetComponent<TMP_InputField>();
+            _folderField.contentType = TMP_InputField.ContentType.Standard;
+            _folderField.lineType = TMP_InputField.LineType.SingleLine;
+            if (_folderField.placeholder is TMP_Text placeholder) placeholder.text = "Default folder";
+            _folderField.onEndEdit.AddListener(text =>
+            {
+                if (text != ReceivedSongs.Folder) ChangeFolder(text);
+            });
+
+            var row = new GameObject("Received Songs Buttons", typeof(RectTransform));
+            row.transform.SetParent(options, false);
+            row.transform.SetSiblingIndex(folderRow.GetSiblingIndex() + 1);
+            ((RectTransform) row.transform).sizeDelta = ((RectTransform) template).sizeDelta;
+            var layout = row.AddComponent<LayoutElement>();
+            layout.minHeight = layout.preferredHeight = ((RectTransform) template).sizeDelta.y;
+            var group = row.AddComponent<HorizontalLayoutGroup>();
+            group.spacing = 10;
+            group.childControlWidth = group.childControlHeight = true;
+            group.childForceExpandWidth = group.childForceExpandHeight = true;
+
+            _changeFolder = new ColoredButtonRef(Instantiate(buttons.Find("Add New Device"), row.transform));
+            _openFolder = new ColoredButtonRef(Instantiate(buttons.Find("Remove Device"), row.transform));
         }
 
         // ------------------------------------------------------------ lifecycle
@@ -259,6 +300,7 @@ namespace YargNetplay.UI
 
             _editButton.SetActive(view == View.Idle && _selectedServer != null);
             _delayField.interactable = session is not { InSongFlow: true };
+            UpdateFolderRows(session, secondary);
 
             switch (view)
             {
@@ -302,6 +344,43 @@ namespace YargNetplay.UI
                     _primary = ToggleReady;
                     break;
             }
+        }
+
+        private void UpdateFolderRows(Session session, Color color)
+        {
+            bool canChange = CanChangeFolder(session, out _);
+            _changeFolder.Set("Change Folder", BrowseFolder, enabled: canChange, color: color);
+            _openFolder.Set("Open Folder", ReceivedSongs.OpenFolder, color: color);
+
+            _folderField.interactable = canChange;
+            if (!_folderField.isFocused && _folderField.text != ReceivedSongs.Folder) _folderField.text = ReceivedSongs.Folder;
+
+            string detail = ReceivedSongs.Busy
+                ? "Moving songs..."
+                : $"{ReceivedSongs.Count} song{(ReceivedSongs.Count == 1 ? "" : "s")}, {ReceivedSongs.TotalBytes / (1024f * 1024f):0.#} MB";
+            string label = $"RECEIVED SONGS\n<size=70%><color=#9fb3c8>{detail}</color></size>";
+            if (_folderLabel.text != label) _folderLabel.text = label;
+        }
+
+        private static bool CanChangeFolder(Session session, out string reason)
+        {
+            reason = ReceivedSongs.Busy ? "Received songs are still being indexed or moved. Try again in a moment."
+                : session is { InSongFlow: true } ? "The folder can't be changed during a song."
+                : session?.Transfer is { Active: true } ? "Wait for the current song transfer to finish."
+                : null;
+            return reason == null;
+        }
+
+        private void BrowseFolder() => FileExplorerHelper.OpenChooseFolder(ReceivedSongs.Folder, ChangeFolder);
+
+        private void ChangeFolder(string folder)
+        {
+            string error = null;
+            bool ok = CanChangeFolder(Session.Current, out error) && ReceivedSongs.TryChangeFolder(folder,
+                (summary, allMoved) => { if (allMoved) Notify.Success(summary); else Notify.Warning(summary); },
+                out error);
+            if (!ok) NetplayDialogs.ShowError(error);
+            _folderField.text = ReceivedSongs.Folder;
         }
 
         private static void ToggleReady()

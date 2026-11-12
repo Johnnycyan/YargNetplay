@@ -19,6 +19,7 @@ namespace YargNetplay
         internal static ConfigEntry<int> Port;
         internal static ConfigEntry<string> LastJoinAddress;
         internal static ConfigEntry<int> RemoteDelayMs;
+        internal static ConfigEntry<string> ReceivedSongsFolder;
 
         private void Awake()
         {
@@ -28,6 +29,9 @@ namespace YargNetplay
             LastJoinAddress = Config.Bind("Network", "LastJoinAddress", "", "Address last used to join (prefilled in the Join dialog).");
             RemoteDelayMs = Config.Bind("Gameplay", "RemoteDelayMs", 200,
                 "How far behind the song the other player's highway runs, in ms. Must be above your ping.");
+            ReceivedSongsFolder = Config.Bind("Songs", "ReceivedSongsFolder", "",
+                "Folder for songs received from other players. Empty uses NetplaySongs in YARG's data folder. " +
+                "Change it from the Online page so existing songs are moved along.");
 
             new Harmony(Guid).PatchAll(typeof(Plugin).Assembly);
 
