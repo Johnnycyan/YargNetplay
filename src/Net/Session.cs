@@ -60,6 +60,7 @@ namespace YargNetplay.Net
         private const double START_LEAD_TIME = 0.75;
         private const int CLOCK_SAMPLES = 16;
         private const int RTT_HISTORY = 30;
+        private const double RTT_WARMUP = 1.0;
         private const double AUTO_DELAY_MARGIN = 0.040;
         private const double AUTO_DELAY_MIN_MS = 50, AUTO_DELAY_MAX_MS = 1000;
 
@@ -76,6 +77,7 @@ namespace YargNetplay.Net
         private double _nextPing;
         private readonly List<(double rtt, double offset)> _clockSamples = new();
         private readonly Queue<double> _rttHistory = new();
+        private double _connectedAt;
 
         public bool IsHost { get; private set; }
 
@@ -93,7 +95,8 @@ namespace YargNetplay.Net
 
         /// <summary>
         /// Delay picked from the network: half the worst round trip of the last <see cref="RTT_HISTORY"/> pings
-        /// (one second apart), plus a margin for frame timing and jitter, rounded up to 10 ms.
+        /// (one second apart), plus a margin for frame timing and jitter, rounded up to 10 ms. Pings sent in the first
+        /// <see cref="RTT_WARMUP"/> seconds of the connection don't count: round trips right after connecting are often much slower.
         /// </summary>
         public double AutoDelaySeconds
         {
@@ -300,6 +303,8 @@ namespace YargNetplay.Net
         private void OnConnected(TcpClient client)
         {
             _conn = new Connection(client);
+            _connectedAt = LocalNow;
+            _rttHistory.Clear();
             _transfer = new SongTransfer(_conn);
             _transfer.SongReceived += OnSongReceived;
             State = SessionState.Lobby;
@@ -400,8 +405,11 @@ namespace YargNetplay.Net
 
                     _clockSamples.Add((rtt, peerTime - (sent + rtt / 2)));
                     if (_clockSamples.Count > CLOCK_SAMPLES) _clockSamples.RemoveAt(0);
-                    _rttHistory.Enqueue(rtt);
-                    if (_rttHistory.Count > RTT_HISTORY) _rttHistory.Dequeue();
+                    if (sent >= _connectedAt + RTT_WARMUP)
+                    {
+                        _rttHistory.Enqueue(rtt);
+                        if (_rttHistory.Count > RTT_HISTORY) _rttHistory.Dequeue();
+                    }
 
                     // The lowest-RTT sample has the least queuing noise.
                     var best = _clockSamples.OrderBy(s => s.rtt).First();
