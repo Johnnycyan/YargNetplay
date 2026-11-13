@@ -2,11 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using TMPro;
 using YARG.Core.Engine;
 using YARG.Core.Game;
 using YARG.Core.Input;
 using YARG.Gameplay;
 using YARG.Gameplay.Player;
+using YARG.Menu.Persistent;
 using YARG.Player;
 
 namespace YargNetplay.Game
@@ -28,6 +30,10 @@ namespace YargNetplay.Game
         private static readonly MethodInfo YargPlayersSetter = AccessTools.PropertySetter(typeof(GameManager), nameof(GameManager.YargPlayers));
 
         public static void SetYargPlayers(GameManager gm, IReadOnlyList<YargPlayer> players) => YargPlayersSetter.Invoke(gm, new object[] { players });
+
+        // DevWatermark (the version label at the top left)
+        public static readonly AccessTools.FieldRef<DevWatermark, TextMeshProUGUI> WatermarkText =
+            AccessTools.FieldRefAccess<DevWatermark, TextMeshProUGUI>("_watermarkText");
 
         // BasePlayer
         public static readonly AccessTools.FieldRef<BasePlayer, List<GameInput>> ReplayInputs =

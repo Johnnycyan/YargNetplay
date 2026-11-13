@@ -24,6 +24,12 @@
          ShowSongs/ShowIndex (see src/Game/Show.cs). Detected from the game assembly; override with -p:YargStaticSetlist=true|false -->
     <YargStaticSetlist Condition="'$(YargStaticSetlist)' == '' And Exists('$(YargManaged)\Assembly-CSharp.dll')">$([System.IO.File]::ReadAllText('$(YargManaged)\Assembly-CSharp.dll').Contains('ResolveSongs'))</YargStaticSetlist>
     <DefineConstants Condition="'$(YargStaticSetlist)' == 'true'">$(DefineConstants);YARG_STATIC_SETLIST</DefineConstants>
+
+    <!-- The YARG channel this build is for (Stable or Nightly): which release DLL the in-game updater downloads.
+         CI passes it; local builds read the YARC Launcher's tag.txt (stable tags are v1.2.3, nightlies b1234). -->
+    <YargTagFile>$(YargDir)\..\tag.txt</YargTagFile>
+    <YargChannel Condition="'$(YargChannel)' == '' And Exists('$(YargTagFile)') And $([System.IO.File]::ReadAllText('$(YargTagFile)').Trim().StartsWith('v'))">Stable</YargChannel>
+    <YargChannel Condition="'$(YargChannel)' == ''">Nightly</YargChannel>
   </PropertyGroup>
 
   <ItemGroup>
@@ -55,13 +61,13 @@
     <Copy SourceFiles="$(TargetPath);$(TargetDir)$(TargetName).pdb" DestinationFolder="$(YargDir)\BepInEx\plugins\YargNetplay" />
   </Target>
 
-  <!-- Plugin.Version as a compile-time constant (BepInPlugin needs a const), from $(Version). -->
+  <!-- Plugin.Version as a compile-time constant (BepInPlugin needs a const), from $(Version), plus the channel. -->
   <Target Name="GenerateBuildInfo" BeforeTargets="CoreCompile">
     <PropertyGroup>
       <BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</BuildInfoFile>
     </PropertyGroup>
     <WriteLinesToFile File="$(BuildInfoFile)" Overwrite="true" WriteOnlyWhenDifferent="true"
-                      Lines="namespace YargNetplay { internal static class BuildInfo { public const string Version = &quot;$(Version)&quot;%3B } }" />
+                      Lines="namespace YargNetplay { internal static class BuildInfo { public const string Version = &quot;$(Version)&quot;%3B public const string Channel = &quot;$(YargChannel)&quot;%3B } }" />
     <ItemGroup>
       <Compile Include="$(BuildInfoFile)" />
       <FileWrites Include="$(BuildInfoFile)" />

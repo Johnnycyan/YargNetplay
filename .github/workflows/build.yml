@@ -108,7 +108,8 @@ jobs:
 
       - name: Build against YARG ${{ matrix.channel }} ${{ env.YARG_TAG }}
         run: |
-          args=(-c Release "-p:YargDir=$PWD/yarg")
+          # The channel tells the in-game updater which release DLL to download.
+          args=(-c Release "-p:YargDir=$PWD/yarg" "-p:YargChannel=${{ matrix.channel }}")
           # Release builds take their version from the tag (v1.2.3 -> 1.2.3); it becomes Plugin.Version.
           if [ -n "$RELEASE" ]; then args+=("-p:Version=${RELEASE#v}"); fi
           dotnet build YargNetplay.csproj "${args[@]}"

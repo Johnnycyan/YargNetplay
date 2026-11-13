@@ -171,6 +171,52 @@ namespace YargNetplay.UI
             Dialogs.ShowMessage("Online", message);
         }
 
+        /// <summary>
+        /// Whether a dialog can open now without covering another one. Used by notices that can wait, such as the update
+        /// check.
+        /// </summary>
+        public static bool CanShowNotice => Dialogs != null && !Dialogs.IsDialogShowing;
+
+        // The update notice is a dialog rather than a toast, so it isn't lost among the startup toasts.
+        private const string UpdateTitle = "YARG Netplay Update";
+
+        public static void ShowUpdateAvailable(string tag, string installed, Action update) =>
+            ShowNotice(UpdateTitle, $"YARG Netplay {tag} is available (you have {installed}).",
+                ("Later", MenuData.Colors.CancelButton, null),
+                ("Update Now", MenuData.Colors.ConfirmButton, update));
+
+        public static void ShowUpdateProgress(string tag) =>
+            ShowNotice(UpdateTitle, $"Downloading YARG Netplay {tag}...");
+
+        public static void ShowUpdateInstalled(string tag) =>
+            ShowNotice(UpdateTitle, $"YARG Netplay {tag} is installed. Restart YARG to start using it.",
+                ("Later", MenuData.Colors.CancelButton, null),
+                ("Quit YARG", MenuData.Colors.ConfirmButton, Application.Quit));
+
+        public static void ShowUpdateFailed(string error, string releaseUrl) =>
+            ShowNotice(UpdateTitle, $"The update couldn't be installed: {error}.\n\n" +
+                                    "You can still update by closing YARG and running the YARG Netplay installer again.",
+                ("Close", MenuData.Colors.CancelButton, null),
+                ("Open Download Page", MenuData.Colors.ConfirmButton, () => Application.OpenURL(releaseUrl)));
+
+        /// <summary>A message dialog with the given buttons; each closes the dialog, then runs its action (if any).</summary>
+        private static void ShowNotice(string title, string message, params (string label, Color color, Action action)[] buttons)
+        {
+            if (Dialogs == null) return;
+            ClearCurrent();
+            var dialog = Dialogs.ShowMessage(title, message);
+            dialog.ClearButtons();
+            foreach (var (label, color, action) in buttons)
+            {
+                var button = dialog.AddDialogButton("Menu.Common.Confirm", color, () =>
+                {
+                    Dialogs.ClearDialog();
+                    action?.Invoke();
+                });
+                button.Text.text = label;
+            }
+        }
+
         // ------------------------------------------------------------ actions
 
         /// <summary>The name the peer sees: the active profile's name.</summary>
