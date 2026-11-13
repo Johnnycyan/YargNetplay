@@ -1,7 +1,65 @@
-# YARG Netplay (prototype)
+# YARG Netplay
 
-A BepInEx 5 plugin that adds online 2-player sessions to YARG without modifying the game.
-Everything runs inside the game and uses YARG's own menus: an **Online** entry in the main menu, YARG's dialogs and toasts, the music library, the setlist and difficulty select. **F8** opens a small debug overlay.
+Play [YARG](https://github.com/YARC-Official/YARG) online with a friend. Both of you see both highways, play the same songs at the same time, and get your own scores. It's a mod (a BepInEx plugin), so YARG itself isn't changed, and everything happens in YARG's own menus. It's an early version: see [Known limitations](#known-limitations).
+
+![Two players' highways side by side during a song](docs/images/gameplay.jpg)
+
+## Install
+
+- **Windows:** download [`YargNetplay-Installer.zip`](https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-Installer.zip), extract it and double-click `Install YARG Netplay.bat`.
+- **Linux and macOS:** run this in a terminal (Terminal.app on macOS):
+  ```bash
+  curl -fsSL https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.sh | bash
+  ```
+  Then start YARG from the new **YARG (Netplay)** shortcut (Linux) or app in `~/Applications` (macOS). The YARC Launcher's Play button starts YARG without the mod. macOS support hasn't been tested on a Mac yet.
+
+The installer finds the YARG versions you installed with the YARC Launcher, works for both Stable and Nightly, and installs everything the mod needs. When a new version of the mod comes out, YARG tells you on the main menu and can update it for you.
+
+Both players need the same YARG version and the same mod version.
+
+## Play together
+
+1. **One player hosts.** In the main menu choose **Online**, then **Host Game**. Press **Copy IP** and send the address to your friend.
+2. **The other player joins.** Choose **Online**, then **Join Address**, and paste the address. It's saved, so next time it's one click.
+3. **Pick your part.** Set the instrument and difficulty you plan to play. The music library then only shows songs that have charts for both of your parts.
+4. **Get ready.** The joining player presses **Ready**, then the host presses **Go to Song Select**, which takes you both to the music library.
+
+   ![The Online page with both players connected](docs/images/lobby.png)
+
+5. **Build a setlist together.** Hold Green on a song to add the first one; after that, a single press of Green adds a song (holding it starts the set). Songs either of you add show up for both. If your friend adds a song you don't have, it's sent to you automatically.
+
+   ![The shared setlist in the music library](docs/images/setlist.png)
+
+6. **Play.** Start the set (hold Green again) or pick a single song. Each of you chooses your own instrument and difficulty. The song starts once you're both ready, at the same moment on both computers.
+
+   ![Waiting for the other player before the song starts](docs/images/waiting.png)
+
+During a song, pausing, restarting or skipping happens for both of you, and leaving a song asks first because it ends the song for your friend too. Your friend's highway runs a fraction of a second behind (the delay is set from your ping), so it shows exactly what they played.
+
+### If your friend can't connect
+
+- Only the host needs an open port. The mod asks your router to open it automatically (UPnP), and the Online page says whether that worked.
+- If it didn't, forward port **47820** (TCP) on the host's router to the host's computer, or use [Tailscale](https://tailscale.com) or [ZeroTier](https://www.zerotier.com) and join with that address instead.
+- Some internet providers share one public address between many customers (carrier-grade NAT). Hosting then only works through Tailscale or ZeroTier, or by letting the other player host.
+- On the same network, use **Copy LAN IP** instead of Copy IP.
+
+### Songs you receive
+
+Songs sent to you are stored in their own folder (shown on the Online page, where you can change it). They're only in your library while you're connected. To keep one, move its `.sng` file into one of your song folders.
+
+## Known limitations
+
+- Two players only, one per computer.
+- Vocals aren't supported yet.
+- Band features (band multiplier, unison star power, the fail meter) react to the other player slightly late.
+- Rock Band CON songs can't be sent to the other player yet.
+- After pausing, the two games can end up slightly out of sync.
+
+---
+
+# Details
+
+The rest of this page is for the curious and for anyone working on the mod. **F8** opens a small debug overlay in-game.
 
 ## How it works
 
@@ -47,13 +105,7 @@ Everything runs inside the game and uses YARG's own menus: an **Online** entry i
 
 Every private member the mod touches is listed in `src/Game/Accessors.cs` and the patch targets in `src/Game/GameHooks.cs`. Check those first when a YARG update breaks the mod.
 
-## Install
-
-- **Windows:** download [`YargNetplay-Installer.zip`](https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-Installer.zip), extract it and double-click `Install YARG Netplay.bat`.
-- **Linux and macOS:** run this in a terminal (Terminal.app on macOS)
-  ```bash
-  curl -fsSL https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.sh | bash
-  ```
+## Installer and updates
 
 The installer downloads the newest YARG Netplay release from GitHub, built for the YARG channel of each install (stable or nightly). It finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\`. Run it again to update the mod. To install a local build instead, pass `-PluginPath <dll>` (Windows) or set `YARGNETPLAY_DLL=<dll>` (Linux and macOS).
 
@@ -108,7 +160,7 @@ Two instances on one PC also share YARG's `currentSong.txt` (written for stream 
 
 Two instances on one PC share one library, so neither is ever missing a song. To test song transfer locally, start one instance with the environment variable `YARGNETPLAY_IGNORE_LIBRARY=1`. That instance then only "has" songs it has received.
 
-## Not done yet
+## Not done yet (details)
 
 - **Vocals:** pitch input is a per-frame stream and needs its own handling.
 - **More than one local player** per machine.
