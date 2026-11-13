@@ -30,7 +30,7 @@ One source tree builds against YARG stable and nightly; CI builds one DLL per ch
 - `src/Net/`: TCP connection, wire protocol (`Protocol.cs`), session state and messages (`Session.cs`), song transfer, saved servers.
 - `src/Game/`: everything that touches YARG: Harmony hooks, the remote player (`RemoteDriver.cs`), setlist sync with YARG's own setlist (`NativeSetlist.cs`), following the peer through menus (`NativeMenus.cs`), part filtering, received songs (`.sng` packaging and in-memory library injection).
 - `src/UI/`: UI built from YARG's own prefabs at runtime (Online page, dialogs, toasts, setlist overlay) plus the F8 IMGUI debug window.
-- `installer/`: Windows (`install.ps1` + `.bat`) and Linux (`install.sh`) installers. They download the release DLL for the YARG channel of each install.
+- `installer/`: Windows (`install.ps1` + `.bat`) and Linux/macOS (`install.sh`, kept compatible with macOS's bash 3.2) installers. They download the release DLL for the YARG channel of each install.
 - `.github/workflows/build.yml`: CI builds, tag releases, and the daily compatibility check.
 
 ## Conventions

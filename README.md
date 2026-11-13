@@ -50,17 +50,18 @@ Every private member the mod touches is listed in `src/Game/Accessors.cs` and th
 ## Install
 
 - **Windows:** download [`YargNetplay-Installer.zip`](https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-Installer.zip), extract it and double-click `Install YARG Netplay.bat`.
-- **Linux:** run
+- **Linux and macOS:** run this in a terminal (Terminal.app on macOS)
   ```bash
   curl -fsSL https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.sh | bash
   ```
 
-The installer downloads the newest YARG Netplay release from GitHub, built for the YARG channel of each install (stable or nightly). It finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\`. Run it again to update the mod. To install a local build instead, pass `-PluginPath <dll>` (Windows) or set `YARGNETPLAY_DLL=<dll>` (Linux).
+The installer downloads the newest YARG Netplay release from GitHub, built for the YARG channel of each install (stable or nightly). It finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\`. Run it again to update the mod. To install a local build instead, pass `-PluginPath <dll>` (Windows) or set `YARGNETPLAY_DLL=<dll>` (Linux and macOS).
 
 - **Native Linux YARG:** BepInEx starts through `run_bepinex.sh`, so the installer adds a "YARG (Netplay)" app shortcut. The YARC Launcher's Play button starts YARG without the mod.
+- **macOS:** the installer finds YARC Launcher installs under `~/Library/Application Support/YARC`, installs BepInEx's universal macOS build next to `YARG.app`, and adds a "YARG (Netplay)" app to `~/Applications` that starts YARG through `run_bepinex.sh` (Apple Silicon runs natively). The YARC Launcher's Play button starts YARG without the mod. Not tested on a Mac yet.
 - **YARG.exe under Wine or Proton:** the Windows BepInEx is installed. Start YARG with `WINEDLLOVERRIDES="winhttp=n,b"`.
 
-Once the main menu has finished loading, the mod checks GitHub for a newer release and shows a dialog if there is one (turn it off with `CheckForUpdates` in the `[Updates]` section of the config). **Update Now** downloads the release DLL for your YARG channel (Stable or Nightly, baked into each build) and swaps it in for the installed plugin; the new version is used after restarting YARG (the dialog offers **Quit YARG**). The running DLL can't be overwritten on Windows, but it can be renamed, so it's moved aside to `YargNetplay.dll.old` and deleted on the next launch. The download is checked (a valid assembly named YargNetplay with the release's version) before it replaces anything. If the update fails, the dialog links the download page and the installers still work.
+Once the main menu has finished loading, the mod checks GitHub for a newer release and shows a dialog if there is one (turn it off with `CheckForUpdates` in the `[Updates]` section of the config). **Update Now** downloads the release DLL for your YARG channel (Stable or Nightly, baked into each build) and swaps it in for the installed plugin; the new version is used after restarting YARG (the dialog offers **Quit YARG**). The running DLL can't be overwritten on Windows, but it can be renamed, so it's moved aside to `YargNetplay.dll.old` and deleted on the next launch (Linux and macOS take the same path). The same DLL runs on every OS, so the update works wherever the installer does. The download is checked (a valid assembly named YargNetplay with the release's version) before it replaces anything. If the update fails, the dialog links the download page and the installers still work.
 
 The mod's version is shown next to YARG's at the top left of the menu. Stable YARG hides that label, so there it shows just the two versions.
 
