@@ -67,6 +67,9 @@ namespace YargNetplay.Net
 
         private TcpListener _listener;
         private Connection _conn;
+
+        /// <summary>The UPnP forward of the hosting port, while waiting for a player (null otherwise).</summary>
+        public PortMapping PortMapping { get; private set; }
         private SongTransfer _transfer;
         private TcpClient _pendingClient; // set by accept/connect threads, picked up on the main thread
         private string _pendingError;
@@ -163,6 +166,7 @@ namespace YargNetplay.Net
 
             s.State = SessionState.Hosting;
             s.Status = $"Hosting on port {port}, waiting for a player...";
+            s.PortMapping = PortMapping.Open(port);
             new Thread(() =>
             {
                 try { s._pendingClient = s._listener.AcceptTcpClient(); }
@@ -212,10 +216,17 @@ namespace YargNetplay.Net
             Notify.Error(message);
         }
 
-        private void Shutdown()
+        private void StopListening()
         {
             try { _listener?.Stop(); } catch { /* ignore */ }
             _listener = null;
+            PortMapping?.Close();
+            PortMapping = null;
+        }
+
+        private void Shutdown()
+        {
+            StopListening();
             _transfer?.Dispose();
             _transfer = null;
             _conn?.Dispose();
@@ -246,8 +257,7 @@ namespace YargNetplay.Net
             {
                 var client = _pendingClient;
                 _pendingClient = null;
-                try { _listener?.Stop(); } catch { /* one peer only */ }
-                _listener = null;
+                StopListening(); // one peer only
                 OnConnected(client);
             }
 

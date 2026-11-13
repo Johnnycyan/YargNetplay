@@ -293,7 +293,7 @@ namespace YargNetplay.UI
             var session = Session.Current;
             var view = CurrentView(session);
 
-            string signature = $"{view}|{session?.PeerName}|{string.Join(";", SavedServers.All.Select(s => s.Name + "@" + s.Address))}";
+            string signature = $"{view}|{session?.PeerName}|{session?.PortMapping?.State}|{string.Join(";", SavedServers.All.Select(s => s.Name + "@" + s.Address))}";
             if (force || signature != _signature)
             {
                 _signature = signature;
@@ -340,7 +340,10 @@ namespace YargNetplay.UI
                 if (view == View.Connected)
                     AddRow(() => $"{session.PeerName}   {PingText(session)}   {PeerStatusText(session)}   {PartText(session.PeerPart)}");
                 else
+                {
                     AddHeader($"<size=70%>Waiting for a player. They join with your IP address and port {Plugin.Port.Value}.</size>");
+                    if (PortMappingText(session.PortMapping) is { } mapping) AddHeader($"<size=70%>{mapping}</size>");
+                }
             }
             else if (view == View.Connected)
             {
@@ -352,6 +355,15 @@ namespace YargNetplay.UI
                 AddHeader($"<size=70%>Connecting to {session.JoinAddress}...</size>");
             }
         }
+
+        private static string PortMappingText(PortMapping mapping) => mapping?.State switch
+        {
+            PortMapping.MappingState.Opening => $"Opening port {mapping.Port} on your router (UPnP)...",
+            PortMapping.MappingState.Open => $"<color=#5ee07a>Port {mapping.Port} was opened on your router automatically (UPnP).</color>",
+            PortMapping.MappingState.Failed => $"<color=#ff8a7a>Couldn't open port {mapping.Port} automatically: {mapping.Error}.</color> " +
+                                               $"Players outside your network need port {mapping.Port} (TCP) forwarded to this PC.",
+            _ => null,
+        };
 
         private static string PingText(Session s) => $"<size=70%><color=#9fb3c8>{s.RttSeconds * 1000:0} ms</color></size>";
 
@@ -516,7 +528,8 @@ namespace YargNetplay.UI
             {
                 string ip = await HostAddress.GetPublicIpAsync();
                 CopyToClipboard(JoinAddress(ip), "your public IP");
-                Notify.Info($"Players outside your network also need port {Plugin.Port.Value} (TCP) forwarded to this PC.");
+                if (Session.Current?.PortMapping?.State != PortMapping.MappingState.Open)
+                    Notify.Info($"Players outside your network also need port {Plugin.Port.Value} (TCP) forwarded to this PC.");
             }
             catch (Exception e)
             {

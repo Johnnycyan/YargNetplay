@@ -35,6 +35,7 @@
     <Reference Include="netstandard"><HintPath>$(YargManaged)\netstandard.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="System"><HintPath>$(YargManaged)\System.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="System.Core"><HintPath>$(YargManaged)\System.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.Xml"><HintPath>$(YargManaged)\System.Xml.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Assembly-CSharp-firstpass"><HintPath>$(YargManaged)\Assembly-CSharp-firstpass.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Assembly-CSharp"><HintPath>$(YargManaged)\Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="YARG.Core.Package"><HintPath>$(YargManaged)\YARG.Core.Package.dll</HintPath><Private>false</Private></Reference>

@@ -26,6 +26,7 @@ namespace YargNetplay
         {
             SceneManager.sceneUnloaded -= OnSceneUnloaded;
             Session.Current?.Dispose();
+            PortMapping.WaitForRemoval(2000); // so quitting while hosting doesn't leave the port open on the router
         }
 
         private void Update()
