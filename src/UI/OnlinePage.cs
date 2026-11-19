@@ -361,11 +361,13 @@ namespace YargNetplay.UI
             PortMapping.MappingState.Opening => $"Opening port {mapping.Port} on your router (UPnP)...",
             PortMapping.MappingState.Open => $"<color=#5ee07a>Port {mapping.Port} was opened on your router automatically (UPnP).</color>",
             PortMapping.MappingState.Failed => $"<color=#ff8a7a>Couldn't open port {mapping.Port} automatically: {mapping.Error}.</color> " +
-                                               $"Players outside your network need port {mapping.Port} (TCP) forwarded to this PC.",
+                                               $"Players outside your network need port {mapping.Port} (TCP and UDP) forwarded to this PC.",
             _ => null,
         };
 
-        private static string PingText(Session s) => $"<size=70%><color=#9fb3c8>{s.RttSeconds * 1000:0} ms</color></size>";
+        // Without UDP, inputs still arrive over TCP, but a lost packet holds up everything behind it.
+        private static string PingText(Session s) => $"<size=70%><color=#9fb3c8>{s.RttSeconds * 1000:0} ms</color>" +
+                                                     $"{(s.UdpFailed ? "  <color=#ffb84d>TCP ONLY</color>" : "")}</size>";
 
         private const string InSongSelectText = "<size=70%><color=#80c0ff>IN SONG SELECT</color></size>";
 
@@ -439,8 +441,9 @@ namespace YargNetplay.UI
         }
 
         /// <summary>
-        /// Auto on: the field shows the delay the next song will use (measured from ping) and can't be edited.
-        /// Auto off: the field is the fixed delay. Neither can change while a song is loading or playing.
+        /// Auto on: the field shows the delay the next song starts with (measured from ping; during the song it follows
+        /// the measured lag) and can't be edited. Auto off: the field is the fixed delay. Neither can change while a song
+        /// is loading or playing.
         /// </summary>
         private void UpdateDelayRows(Session session)
         {
@@ -464,7 +467,7 @@ namespace YargNetplay.UI
                 if (_delayField.text != text) _delayField.text = text;
             }
 
-            string detail = auto ? "From ping" : "Fixed, in ms";
+            string detail = auto ? "From ping, then adjusts" : "Fixed, in ms";
             string label = $"REMOTE PLAYER DELAY\n<size=70%><color=#9fb3c8>{detail}</color></size>";
             if (_delayLabel.text != label) _delayLabel.text = label;
         }
@@ -529,7 +532,7 @@ namespace YargNetplay.UI
                 string ip = await HostAddress.GetPublicIpAsync();
                 CopyToClipboard(JoinAddress(ip), "your public IP");
                 if (Session.Current?.PortMapping?.State != PortMapping.MappingState.Open)
-                    Notify.Info($"Players outside your network also need port {Plugin.Port.Value} (TCP) forwarded to this PC.");
+                    Notify.Info($"Players outside your network also need port {Plugin.Port.Value} (TCP and UDP) forwarded to this PC.");
             }
             catch (Exception e)
             {

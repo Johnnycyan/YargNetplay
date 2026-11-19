@@ -66,8 +66,29 @@ namespace YargNetplay.Net
 
         private static readonly double TicksToSeconds = 1.0 / Stopwatch.Frequency;
 
+        private const double UDP_PROBE_INTERVAL = 0.5, UDP_KEEPALIVE_INTERVAL = 1.0;
+        private const double UDP_GRACE = 5.0; // how long after connecting UDP may take to get through before the page says it didn't
+        private const int UDP_REPEATED_INPUTS = 16;
+        private const double UDP_REPEAT_WINDOW = 1.0; // inputs older than this (behind the watermark) aren't repeated
+        private const double STREAM_MIN_INTERVAL = 0.005;
+
         private TcpListener _listener;
         private Connection _conn;
+        private int _listenPort;
+
+        /// <summary>Inputs and watermarks also go over UDP when this is set (see <see cref="UdpChannel"/>).</summary>
+        private UdpChannel _udp;
+        private IPAddress _peerAddress;
+        private double _nextUdpProbe;
+        private bool _udpWasAlive;
+
+        // Our input stream for the current song: numbered inputs, the latest ones (repeated in every UDP packet), and
+        // the last watermark sent.
+        private int _sendSeq;
+        private readonly List<(int seq, GameInput input)> _recentInputs = new();
+        private double _lastMarkSent = double.NegativeInfinity;
+        private double _nextStreamSend;
+        private bool _inputsSinceStream;
 
         /// <summary>The UPnP forward of the hosting port, while waiting for a player (null otherwise).</summary>
         public PortMapping PortMapping { get; private set; }
@@ -108,7 +129,10 @@ namespace YargNetplay.Net
             }
         }
 
-        /// <summary>How far behind the shared song clock the remote player is simulated. Fixed for each song when it loads.</summary>
+        /// <summary>
+        /// How far behind the shared song clock the remote player starts each song. With Auto delay on,
+        /// <see cref="RemoteDriver"/> then adjusts it to the lag it measures.
+        /// </summary>
         public double RemoteDelaySeconds => Plugin.AutoDelay.Value ? AutoDelaySeconds : Plugin.RemoteDelayMs.Value / 1000.0;
 
         /// <summary>The shared setlist. Mirrored into YARG's own setlist by <see cref="NativeSetlist"/>.</summary>
@@ -135,6 +159,12 @@ namespace YargNetplay.Net
         public double HostNow => LocalNow + _clockOffset;
 
         public bool IsConnected => _conn != null && !_conn.IsClosed;
+
+        /// <summary>Whether UDP packets from the peer are getting through.</summary>
+        public bool UdpWorking => _udp?.Alive == true;
+
+        /// <summary>Connected for a while, but no UDP packets got through: inputs only travel over TCP.</summary>
+        public bool UdpFailed => IsConnected && !UdpWorking && LocalNow - _connectedAt > UDP_GRACE;
         public SongTransfer Transfer => _transfer;
         public bool InSongFlow => State is SessionState.Loading or SessionState.InSong;
 
@@ -153,7 +183,7 @@ namespace YargNetplay.Net
         public static Session Host(int port)
         {
             Current?.Dispose();
-            var s = new Session { IsHost = true };
+            var s = new Session { IsHost = true, _listenPort = port };
             Current = s;
 
             try
@@ -223,13 +253,16 @@ namespace YargNetplay.Net
         {
             try { _listener?.Stop(); } catch { /* ignore */ }
             _listener = null;
-            PortMapping?.Close();
-            PortMapping = null;
         }
 
         private void Shutdown()
         {
             StopListening();
+            // The port forward stays up while connected: the peer's UDP packets come in through it.
+            PortMapping?.Close();
+            PortMapping = null;
+            _udp?.Dispose();
+            _udp = null;
             _transfer?.Dispose();
             _transfer = null;
             _conn?.Dispose();
@@ -289,6 +322,8 @@ namespace YargNetplay.Net
                 _conn.Send(MsgType.Ping, w => w.Write(t));
             }
 
+            UpdateUdp();
+
             CheckReady();
 
             // Host: both sides loaded, schedule the shared start.
@@ -302,6 +337,7 @@ namespace YargNetplay.Net
 
         private void OnConnected(TcpClient client)
         {
+            _peerAddress = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
             _conn = new Connection(client);
             _connectedAt = LocalNow;
             _rttHistory.Clear();
@@ -321,6 +357,66 @@ namespace YargNetplay.Net
             SendPartChoice();
             SendSongSelectState(NativeMenus.InSongSelect);
             PartFilter.ApplyToProfile(PartFilter.LocalPart);
+
+            // The host takes UDP on its hosting port (the one forwarded to it); the joining player on any free port.
+            _udp = _peerAddress != null ? UdpChannel.Open(IsHost ? _listenPort : 0) : null;
+            if (_udp != null)
+            {
+                ulong token = _udp.LocalToken;
+                int port = _udp.LocalPort;
+                _conn.Send(MsgType.UdpInfo, w => { w.Write(token); w.Write(port); });
+            }
+        }
+
+        // ---------------------------------------------------------------- UDP
+
+        private void UpdateUdp()
+        {
+            if (_udp == null) return;
+
+            while (_udp != null && _udp.TryReceive(out byte kind, out var r))
+            {
+                try { HandleUdp(kind, r); }
+                catch (Exception e) { Plugin.Log.LogWarning($"Bad UDP packet: {e.Message}"); }
+            }
+
+            if (_udp == null || !_udp.HasPeer) return;
+
+            bool alive = _udp.Alive;
+            if (alive != _udpWasAlive)
+            {
+                _udpWasAlive = alive;
+                Plugin.Log.LogInfo(alive ? "UDP: packets from the peer are getting through" : "UDP: no packets from the peer lately; inputs use TCP only");
+            }
+
+            // Probes open the way through both NATs and keep it open. During songs the input packets do that.
+            if (LocalNow >= _nextUdpProbe)
+            {
+                _nextUdpProbe = LocalNow + (alive ? UDP_KEEPALIVE_INTERVAL : UDP_PROBE_INTERVAL);
+                _udp.Send(UdpChannel.KindProbe);
+            }
+        }
+
+        private void HandleUdp(byte kind, BinaryReader r)
+        {
+            if (kind != UdpChannel.KindInputs) return; // probes only show the way is open
+
+            double songKey = r.ReadDouble();
+            int lastSeq = r.ReadInt32();
+            double mark = r.ReadDouble();
+            int count = r.ReadByte();
+
+            // From an earlier song (UDP can arrive late), or the song isn't set up here yet: TCP brings it anyway.
+            if (StartAtHostTime != songKey || !InSongFlow) return;
+
+            for (int i = 0; i < count; i++)
+            {
+                double time = r.ReadDouble();
+                int action = r.ReadInt32();
+                int value = r.ReadInt32();
+                RemoteInputs.Add(lastSeq - count + 1 + i, new GameInput(time, action, value));
+            }
+            RemoteInputs.SetWatermark(lastSeq, mark);
         }
 
         // ---------------------------------------------------------------- song select presence
@@ -561,10 +657,27 @@ namespace YargNetplay.Net
 
                 case MsgType.Input:
                 {
+                    int seq = r.ReadInt32();
                     double time = r.ReadDouble();
                     int action = r.ReadInt32();
                     int value = r.ReadInt32();
-                    RemoteInputs.Enqueue(new GameInput(time, action, value));
+                    RemoteInputs.Add(seq, new GameInput(time, action, value));
+                    break;
+                }
+
+                case MsgType.Watermark:
+                {
+                    int lastSeq = r.ReadInt32();
+                    double mark = r.ReadDouble();
+                    RemoteInputs.SetWatermark(lastSeq, mark);
+                    break;
+                }
+
+                case MsgType.UdpInfo:
+                {
+                    ulong token = r.ReadUInt64();
+                    int port = r.ReadInt32();
+                    _udp?.SetPeer(_peerAddress, port, token);
                     break;
                 }
 
@@ -893,6 +1006,7 @@ namespace YargNetplay.Net
             PeerLoaded = false;
             StartAtHostTime = null;
             RemoteInputs.Clear();
+            ResetInputStream();
             State = SessionState.Loading;
             Status = $"Playing with {PeerName}";
 
@@ -932,7 +1046,58 @@ namespace YargNetplay.Net
         {
             if (!IsConnected) return;
             var i = input;
-            _conn.Send(MsgType.Input, w => { w.Write(i.Time); w.Write(i.Action); w.Write(i.Integer); });
+            int seq = _sendSeq++;
+            _recentInputs.Add((seq, i));
+            if (_recentInputs.Count > UDP_REPEATED_INPUTS) _recentInputs.RemoveAt(0);
+            _inputsSinceStream = true;
+            _conn.Send(MsgType.Input, w => { w.Write(seq); w.Write(i.Time); w.Write(i.Action); w.Write(i.Integer); });
+        }
+
+        /// <summary>
+        /// Called every frame of a song with our engine's time, after it has taken this frame's inputs. Sends the
+        /// watermark over TCP, and over UDP together with the latest inputs (again), so the peer gets them even when a
+        /// TCP packet is held up.
+        /// </summary>
+        public void SendInputStream(double engineTime)
+        {
+            if (!IsConnected || StartAtHostTime is not double songKey) return;
+            if (!_inputsSinceStream && engineTime <= _lastMarkSent) return;
+            if (LocalNow < _nextStreamSend) return;
+            _nextStreamSend = LocalNow + STREAM_MIN_INTERVAL;
+            _inputsSinceStream = false;
+            _lastMarkSent = Math.Max(_lastMarkSent, engineTime);
+
+            int lastSeq = _sendSeq - 1;
+            double mark = _lastMarkSent;
+            _conn.Send(MsgType.Watermark, w => { w.Write(lastSeq); w.Write(mark); });
+
+            if (_udp == null) return;
+            // Only the newest inputs, and none from long ago: all repeated inputs must be numbered in a row up to lastSeq.
+            int first = _recentInputs.Count;
+            while (first > 0 && _recentInputs[first - 1].input.Time >= mark - UDP_REPEAT_WINDOW) first--;
+            _udp.Send(UdpChannel.KindInputs, w =>
+            {
+                w.Write(songKey);
+                w.Write(lastSeq);
+                w.Write(mark);
+                w.Write((byte) (_recentInputs.Count - first));
+                for (int k = first; k < _recentInputs.Count; k++)
+                {
+                    var input = _recentInputs[k].input;
+                    w.Write(input.Time);
+                    w.Write(input.Action);
+                    w.Write(input.Integer);
+                }
+            });
+        }
+
+        private void ResetInputStream()
+        {
+            _sendSeq = 0;
+            _recentInputs.Clear();
+            _lastMarkSent = double.NegativeInfinity;
+            _nextStreamSend = 0;
+            _inputsSinceStream = false;
         }
 
         public void SendPause(bool paused) => _conn?.Send(paused ? MsgType.Pause : MsgType.Resume);
@@ -993,6 +1158,7 @@ namespace YargNetplay.Net
             PeerLoaded = false;
             StartAtHostTime = null;
             RemoteInputs.Clear();
+            ResetInputStream();
             if (State is SessionState.Loading or SessionState.InSong)
             {
                 State = IsConnected ? SessionState.Lobby : SessionState.Idle;

@@ -9,7 +9,7 @@ namespace YargNetplay.Net
     /// </summary>
     internal static class Protocol
     {
-        public const int Version = 9;
+        public const int Version = 10;
         public const int DefaultPort = 47820;
         public const int MaxFrameBytes = 16 * 1024 * 1024;
     }
@@ -61,7 +61,10 @@ namespace YargNetplay.Net
         /// <summary>double hostTime. Host to client: open the start gate at this host-clock time.</summary>
         StartAt,
 
-        /// <summary>double songTime, int action, int value. One gameplay input from the sender's player.</summary>
+        /// <summary>
+        /// int seq, double songTime, int action, int value. One gameplay input from the sender's player. Numbered from 0
+        /// each song, so the copy that also travels over UDP (<see cref="UdpChannel"/>) is only used once.
+        /// </summary>
         Input,
 
         Pause,
@@ -102,6 +105,18 @@ namespace YargNetplay.Net
         /// the pause menu; the receiver does the same. Both then meet at the ready gate for that song.
         /// </summary>
         ChangeSong,
+
+        /// <summary>
+        /// int lastSeq, double engineTime. The sender's engine has reached engineTime, so after input lastSeq it can't
+        /// send an input earlier than that. The remote player never runs past it, so it never misses a late input.
+        /// </summary>
+        Watermark,
+
+        /// <summary>
+        /// ulong token, int udpPort. The sender listens for UDP on that port and accepts packets that carry the token
+        /// (see <see cref="UdpChannel"/>). Not sent when the sender couldn't open a UDP socket.
+        /// </summary>
+        UdpInfo,
     }
 
     internal static class BinaryExtensions

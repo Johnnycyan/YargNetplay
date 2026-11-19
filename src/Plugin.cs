@@ -33,9 +33,10 @@ namespace YargNetplay
             Port = Config.Bind("Network", "Port", Protocol.DefaultPort, "TCP port used when hosting.");
             LastJoinAddress = Config.Bind("Network", "LastJoinAddress", "", "Address last used to join (prefilled in the Join dialog).");
             RemoteDelayMs = Config.Bind("Gameplay", "RemoteDelayMs", 200,
-                "How far behind the song the other player's highway runs, in ms, when AutoDelay is off. Must be above your ping.");
+                "How far behind the song the other player's highway runs, in ms, when AutoDelay is off. " +
+                "Too short for the connection and their highway pauses now and then to wait for their inputs.");
             AutoDelay = Config.Bind("Gameplay", "AutoDelay", true,
-                "Pick the remote player delay from the measured ping at the start of each song.");
+                "Start each song with a remote player delay picked from the measured ping, then follow the lag measured during the song.");
             ReceivedSongsFolder = Config.Bind("Songs", "ReceivedSongsFolder", "",
                 "Folder for songs received from other players. Empty uses NetplaySongs in YARG's data folder. " +
                 "Change it from the Online page so existing songs are moved along.");

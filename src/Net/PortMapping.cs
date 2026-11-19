@@ -15,8 +15,9 @@ namespace YargNetplay.Net
 {
     /// <summary>
     /// Asks the router to forward the hosting port to this PC with UPnP (Internet Gateway Device), so the host doesn't
-    /// have to set up port forwarding by hand. Opened while waiting for a player and removed once they're connected
-    /// (the established connection doesn't need it) or hosting stops. When the router has UPnP turned off, or there's
+    /// have to set up port forwarding by hand. Both TCP (the connection) and UDP (inputs during songs) are forwarded.
+    /// Opened while hosting and removed when the session ends: the peer's UDP packets keep coming in through it after
+    /// the TCP connection is up. When the router has UPnP turned off, or there's
     /// none, the port just stays closed and the Online page says so.
     /// </summary>
     internal sealed class PortMapping
@@ -58,7 +59,7 @@ namespace YargNetplay.Net
 
         private PortMapping(int port) => Port = port;
 
-        /// <summary>Starts opening <paramref name="port"/> (TCP) on the router in the background.</summary>
+        /// <summary>Starts opening <paramref name="port"/> (TCP and UDP) on the router in the background.</summary>
         public static PortMapping Open(int port)
         {
             var mapping = new PortMapping(port);
@@ -97,12 +98,14 @@ namespace YargNetplay.Net
         private void OpenUntilClosed()
         {
             Gateway gateway;
+            bool udp = false;
             try
             {
                 gateway = FindGateway();
-                int lease = AddMapping(gateway);
+                int lease = AddMapping(gateway, "TCP");
+                udp = TryAddUdp(gateway);
                 State = MappingState.Open;
-                Plugin.Log.LogInfo($"UPnP: opened port {Port} (TCP) to {gateway.LocalIp} on {gateway.ControlUrl}" +
+                Plugin.Log.LogInfo($"UPnP: opened port {Port} ({(udp ? "TCP and UDP" : "TCP")}) to {gateway.LocalIp} on {gateway.ControlUrl}" +
                                    (lease == 0 ? " (permanent lease)" : ""));
 
                 while (true)
@@ -112,8 +115,9 @@ namespace YargNetplay.Net
                         if (!_closed) Monitor.Wait(_lock, lease == 0 ? Timeout.Infinite : lease * 1000 / 2);
                         if (_closed) break;
                     }
-                    try { lease = AddMapping(gateway); }
+                    try { lease = AddMapping(gateway, "TCP"); }
                     catch (Exception e) { Plugin.Log.LogWarning($"UPnP: couldn't renew port {Port}: {e.Message}"); }
+                    udp = TryAddUdp(gateway) || udp;
                 }
             }
             catch (Exception e)
@@ -124,20 +128,41 @@ namespace YargNetplay.Net
                 return;
             }
 
+            foreach (string protocol in udp ? new[] { "TCP", "UDP" } : new[] { "TCP" })
+            {
+                try
+                {
+                    Soap(gateway, "DeletePortMapping",
+                        $"<NewRemoteHost></NewRemoteHost><NewExternalPort>{Port}</NewExternalPort><NewProtocol>{protocol}</NewProtocol>");
+                    Plugin.Log.LogInfo($"UPnP: closed port {Port} ({protocol}).");
+                }
+                catch (Exception e) { Plugin.Log.LogWarning($"UPnP: couldn't close port {Port} ({protocol}): {e.Message}"); }
+            }
+        }
+
+        /// <summary>
+        /// UDP carries inputs during songs, but the game works over TCP alone (and UDP often gets through without a
+        /// forward), so failing to forward it isn't an error.
+        /// </summary>
+        private bool TryAddUdp(Gateway gateway)
+        {
             try
             {
-                Soap(gateway, "DeletePortMapping",
-                    $"<NewRemoteHost></NewRemoteHost><NewExternalPort>{Port}</NewExternalPort><NewProtocol>TCP</NewProtocol>");
-                Plugin.Log.LogInfo($"UPnP: closed port {Port}.");
+                AddMapping(gateway, "UDP");
+                return true;
             }
-            catch (Exception e) { Plugin.Log.LogWarning($"UPnP: couldn't close port {Port}: {e.Message}"); }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning($"UPnP: couldn't open port {Port} (UDP): {e.Message}");
+                return false;
+            }
         }
 
         /// <summary>Adds (or refreshes) the mapping. Returns the lease it got: 0 when the router only allows permanent ones.</summary>
-        private int AddMapping(Gateway gateway)
+        private int AddMapping(Gateway gateway, string protocol)
         {
             string Args(int lease) =>
-                $"<NewRemoteHost></NewRemoteHost><NewExternalPort>{Port}</NewExternalPort><NewProtocol>TCP</NewProtocol>" +
+                $"<NewRemoteHost></NewRemoteHost><NewExternalPort>{Port}</NewExternalPort><NewProtocol>{protocol}</NewProtocol>" +
                 $"<NewInternalPort>{Port}</NewInternalPort><NewInternalClient>{gateway.LocalIp}</NewInternalClient>" +
                 $"<NewEnabled>1</NewEnabled><NewPortMappingDescription>{Description}</NewPortMappingDescription>" +
                 $"<NewLeaseDuration>{lease}</NewLeaseDuration>";

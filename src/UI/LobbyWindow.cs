@@ -87,7 +87,12 @@ namespace YargNetplay.UI
             GUILayout.Label(session.Status);
             GUILayout.FlexibleSpace();
             if (session.IsConnected)
+            {
                 GUILayout.Label($"Ping {session.RttSeconds * 1000:0} ms", GUILayout.Width(90));
+                GUILayout.Label(session.UdpWorking ? "UDP ok" : "TCP only", GUILayout.Width(70));
+                if (session.InSongFlow)
+                    GUILayout.Label($"Now {Game.RemoteDriver.CurrentDelay * 1000:0} ms behind", GUILayout.Width(130));
+            }
             if (GUILayout.Button(session.IsConnected ? "Disconnect" : "Cancel", GUILayout.Width(90)))
                 session.Dispose();
             GUILayout.EndHorizontal();
