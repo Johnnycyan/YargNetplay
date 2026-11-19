@@ -45,6 +45,14 @@ namespace YargNetplay.Game
         public static readonly Action<BasePlayer, GameInput> OnInputQueued =
             AccessTools.MethodDelegate<Action<BasePlayer, GameInput>>(AccessTools.Method(typeof(BasePlayer), "OnInputQueued"));
 
+        // BasePlayer.IsActive only exists on nightly (an inactive player's engine isn't updated). Stable players always are.
+        private static readonly Func<BasePlayer, bool> IsActiveGetter =
+            AccessTools.PropertyGetter(typeof(BasePlayer), "IsActive") is MethodInfo isActive
+                ? AccessTools.MethodDelegate<Func<BasePlayer, bool>>(isActive)
+                : null;
+
+        public static bool IsActive(BasePlayer player) => IsActiveGetter?.Invoke(player) ?? true;
+
         // TrackPlayer: pools whose children are positioned from GameManager.VisualTime
         public static readonly FieldInfo[] TrackPools =
         {

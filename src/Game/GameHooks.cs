@@ -243,6 +243,23 @@ namespace YargNetplay.Game
                 RemoteDriver.Update(__instance, GameManager, session);
                 return false;
             }
+
+            /// <summary>
+            /// After the local engine took this frame's inputs and updated: tell the peer how far it got. The engine moves
+            /// any later input up to its current time, so no input we send from now on can be earlier than this.
+            /// A player that isn't active takes no inputs at all, so the song time is just as safe.
+            /// </summary>
+            private static void Postfix(BasePlayer __instance)
+            {
+                var session = ActiveSession;
+                var gm = GameManager;
+                if (session == null || gm == null || !gm.Started || __instance.Player != LocalPlayer) return;
+
+                double mark = Accessors.IsActive(__instance)
+                    ? __instance.BaseEngine.CurrentTime
+                    : gm.InputTime + __instance.InputCalibration;
+                session.SendInputStream(mark);
+            }
         }
 
         /// <summary>Forward every input the local engine accepted. _replayInputs only grows when the input was really queued.</summary>

@@ -189,13 +189,62 @@ namespace YargNetplay.Game
         }
     }
 
-    /// <summary>Main-thread FIFO of the peer's inputs, in their song time.</summary>
+    /// <summary>
+    /// Main-thread FIFO of the peer's inputs, in their song time. Inputs arrive numbered, over both TCP and UDP, so
+    /// duplicates are dropped and ones that arrive early (a lost UDP packet) wait until the gap is filled.
+    /// </summary>
     internal sealed class RemoteInputBuffer
     {
         private readonly Queue<GameInput> _queue = new();
+        private readonly Dictionary<int, GameInput> _early = new();
+        private readonly List<(int lastSeq, double time)> _pendingMarks = new();
+        private int _nextSeq;
 
-        public void Enqueue(GameInput input) => _queue.Enqueue(input);
-        public void Clear() => _queue.Clear();
+        /// <summary>
+        /// The peer's engine time up to which every input they will ever send has arrived (-infinity before the first
+        /// one). The remote player must not run past it.
+        /// </summary>
+        public double Watermark { get; private set; } = double.NegativeInfinity;
+
+        public void Clear()
+        {
+            _queue.Clear();
+            _early.Clear();
+            _pendingMarks.Clear();
+            _nextSeq = 0;
+            Watermark = double.NegativeInfinity;
+        }
+
+        public void Add(int seq, GameInput input)
+        {
+            if (seq < _nextSeq || _early.ContainsKey(seq)) return;
+            _early[seq] = input;
+            while (_early.TryGetValue(_nextSeq, out var next))
+            {
+                _early.Remove(_nextSeq);
+                _queue.Enqueue(next);
+                _nextSeq++;
+            }
+            ApplyMarks();
+        }
+
+        /// <summary>The peer reached <paramref name="time"/> after sending input <paramref name="lastSeq"/>. Counts once that input is here.</summary>
+        public void SetWatermark(int lastSeq, double time)
+        {
+            if (time <= Watermark) return;
+            _pendingMarks.Add((lastSeq, time));
+            ApplyMarks();
+        }
+
+        private void ApplyMarks()
+        {
+            for (int i = _pendingMarks.Count - 1; i >= 0; i--)
+            {
+                var (lastSeq, time) = _pendingMarks[i];
+                if (lastSeq < _nextSeq) Watermark = Math.Max(Watermark, time);
+                if (lastSeq < _nextSeq || time <= Watermark) _pendingMarks.RemoveAt(i);
+            }
+        }
 
         public bool TryDequeueUpTo(double time, out GameInput input)
         {
