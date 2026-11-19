@@ -6,7 +6,11 @@ Play [YARG](https://github.com/YARC-Official/YARG) online with a friend. Both of
 
 ## Install
 
-- **Windows:** download [`YargNetplay-Installer.zip`](https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-Installer.zip), extract it and double-click `Install YARG Netplay.bat`.
+- **Windows:** run this in PowerShell:
+  ```powershell
+  irm https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.ps1 | iex
+  ```
+  Or download [`YargNetplay-Installer.zip`](https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-Installer.zip), extract it and double-click `Install YARG Netplay.bat`.
 - **Linux and macOS:** run this in a terminal (Terminal.app on macOS):
   ```bash
   curl -fsSL https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.sh | bash

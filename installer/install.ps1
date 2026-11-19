@@ -1,5 +1,6 @@
 # YARG Netplay installer: installs BepInEx 5 (if needed) and the newest YargNetplay plugin from GitHub into YARG.
 # Run it through "Install YARG Netplay.bat", or: powershell -ExecutionPolicy Bypass -File install.ps1 [-YargPath <folder>]
+# or straight from GitHub: irm https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.ps1 | iex
 # Run it again any time to update the mod.
 param(
     # A YARG folder (the one with YARG.exe). Skips the search and the menu.
@@ -17,7 +18,12 @@ $BepInExUrl = "https://github.com/BepInEx/BepInEx/releases/download/v$BepInExVer
 $BepInExSha256 = '6c57a714a892efb4e9e1fef63d608a3391f30ec984031c465404e4ee381a0755'
 
 function Write-Step($text) { Write-Host "`n$text" -ForegroundColor Cyan }
-function Fail($text) { Write-Host "`n$text" -ForegroundColor Red; exit 1 }
+# Run through "irm | iex" the script runs inside the user's own PowerShell session (no $PSCommandPath), where exit
+# would close their window, so it stops with an error there instead.
+function Fail($text) {
+    if ($PSCommandPath) { Write-Host "`n$text" -ForegroundColor Red; exit 1 }
+    throw $text
+}
 
 # One build per YARG channel: YargNetplay-Stable.dll and YargNetplay-Nightly.dll.
 $PluginUrl = 'https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-{0}.dll'
