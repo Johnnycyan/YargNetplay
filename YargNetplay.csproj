@@ -24,6 +24,10 @@
          ShowSongs/ShowIndex (see src/Game/Show.cs). Detected from the game assembly; override with -p:YargStaticSetlist=true|false -->
     <YargStaticSetlist Condition="'$(YargStaticSetlist)' == '' And Exists('$(YargManaged)\Assembly-CSharp.dll')">$([System.IO.File]::ReadAllText('$(YargManaged)\Assembly-CSharp.dll').Contains('ResolveSongs'))</YargStaticSetlist>
     <DefineConstants Condition="'$(YargStaticSetlist)' == 'true'">$(DefineConstants);YARG_STATIC_SETLIST</DefineConstants>
+    <!-- Newer nightlies (b4378 has it) rebuilt the Profiles page the Online page is cloned from (see src/UI/ProfilesTemplate.cs).
+         Detected from the game assembly; override with -p:YargProfilesMenu=true|false -->
+    <YargProfilesMenu Condition="'$(YargProfilesMenu)' == '' And Exists('$(YargManaged)\Assembly-CSharp.dll')">$([System.IO.File]::ReadAllText('$(YargManaged)\Assembly-CSharp.dll').Contains('ProfileCenterPane'))</YargProfilesMenu>
+    <DefineConstants Condition="'$(YargProfilesMenu)' == 'true'">$(DefineConstants);YARG_PROFILES_MENU</DefineConstants>
 
     <!-- The YARG channel this build is for (Stable or Nightly): which release DLL the in-game updater downloads.
          CI passes it; local builds read the YARC Launcher's tag.txt (stable tags are v1.2.3, nightlies b1234). -->

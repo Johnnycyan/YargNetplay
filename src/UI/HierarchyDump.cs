@@ -18,7 +18,7 @@ namespace YargNetplay.UI
                 sb.AppendLine($"===== MenuObject {menu.Menu} ({menu.name}) parent={menu.transform.parent?.name}");
                 Dump(menu.transform, 0, sb, 6);
             }
-            var profileList = Object.FindAnyObjectByType<YARG.Menu.ProfileList.ProfileListMenu>(FindObjectsInactive.Include);
+            var profileList = (Component) Object.FindAnyObjectByType(ProfilesTemplate.MenuType, FindObjectsInactive.Include);
             if (profileList != null)
             {
                 foreach (var name in new[] { "_profileViewPrefab", "_profileListHeaderPrefab" })
@@ -27,10 +27,10 @@ namespace YargNetplay.UI
                     sb.AppendLine($"===== prefab {name}");
                     if (prefab != null) Dump(prefab.transform, 0, sb, 12);
                 }
-                var row = profileList.transform.Find("Sidebar/Contents/ScrollView/Viewport/Content/Input Calibration");
+                var row = profileList.transform.Find(ProfilesTemplate.Sidebar + "/ScrollView/Viewport/Content/Input Calibration");
                 sb.AppendLine("===== Input Calibration row");
                 if (row != null) Dump(row, 0, sb, 12);
-                var lefty = profileList.transform.Find("Sidebar/Contents/ScrollView/Viewport/Content/Lefty Flip");
+                var lefty = profileList.transform.Find(ProfilesTemplate.Sidebar + "/ScrollView/Viewport/Content/Lefty Flip");
                 sb.AppendLine("===== Lefty Flip row");
                 if (lefty != null) Dump(lefty, 0, sb, 12);
             }

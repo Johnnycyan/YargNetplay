@@ -74,16 +74,8 @@ namespace YargNetplay.UI
             go.SetActive(false);
             go.name = "OnlineMenu";
 
-            var profileList = go.GetComponent<ProfileListMenu>();
-            var rowPrefab = (GameObject) AccessTools.Field(typeof(ProfileListMenu), "_profileViewPrefab").GetValue(profileList);
-            var headerPrefab = (GameObject) AccessTools.Field(typeof(ProfileListMenu), "_profileListHeaderPrefab").GetValue(profileList);
-
             // Drop the Profiles page's own logic; keep its visuals.
-            DestroyImmediate(profileList);
-            foreach (var sidebar in go.GetComponentsInChildren<ProfileSidebar>(true))
-                DestroyImmediate(sidebar);
-            var highway = go.transform.Find("HighwayConfigurationMenu");
-            if (highway != null) DestroyImmediate(highway.gameObject);
+            var (rowPrefab, headerPrefab) = ProfilesTemplate.Strip(go);
             StripBehaviour(go);
 
             AccessTools.Field(typeof(MenuObject), "<Menu>k__BackingField").SetValue(go.GetComponent<MenuObject>(), MenuId);
@@ -109,6 +101,7 @@ namespace YargNetplay.UI
             }
             foreach (var dropdown in root.GetComponentsInChildren<TMP_Dropdown>(true))
                 dropdown.onValueChanged = new TMP_Dropdown.DropdownEvent();
+            ProfilesTemplate.StripTooltips(root);
         }
 
         private void Build(GameObject rowPrefab, GameObject headerPrefab)
@@ -116,19 +109,14 @@ namespace YargNetplay.UI
             _rowPrefab = rowPrefab;
             _headerPrefab = headerPrefab;
 
-            var header = transform.Find("GenericHeader");
+            var header = transform.Find(ProfilesTemplate.Header);
             header.Find("Single Header Text").GetComponent<TMP_Text>().text = "Online";
             header.Find("Button").GetComponent<Button>().onClick.AddListener(Back);
-            foreach (var name in new[] { "Add Profile", "Add Bot" })
-            {
-                var extra = header.Find(name);
-                if (extra != null) extra.gameObject.SetActive(false);
-            }
 
-            _list = transform.Find("Background/Profiles/Viewport/Content");
-            _listGroup = transform.Find("Background/Profiles").GetComponent<NavigationGroup>();
+            _list = transform.Find(ProfilesTemplate.ListContent);
+            _listGroup = transform.Find(ProfilesTemplate.List).GetComponent<NavigationGroup>();
 
-            var sidebar = transform.Find("Sidebar/Contents");
+            var sidebar = transform.Find(ProfilesTemplate.Sidebar);
             _sidebarTitle = sidebar.Find("Header/Profile Name Container/Profile Name").GetComponent<TMP_Text>();
             _editButton = sidebar.Find("Header/Profile Name Container/Edit").gameObject;
             _editButton.GetComponentInChildren<Button>(true).onClick.AddListener(RenameSelectedServer);
@@ -594,6 +582,7 @@ namespace YargNetplay.UI
         {
             var go = Instantiate(_headerPrefab, _list);
             foreach (var localize in go.GetComponentsInChildren<LocalizeText>(true)) DestroyImmediate(localize);
+            ProfilesTemplate.StripTooltips(go);
             var label = go.GetComponentInChildren<TMP_Text>();
             label.richText = true;
             label.text = text;
