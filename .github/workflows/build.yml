@@ -172,8 +172,8 @@ jobs:
           merge-multiple: true
           path: dist
 
-      # The installers download releases/latest/download/YargNetplay-<Stable|Nightly>.dll, and the mod's update check
-      # reads the latest release.
+      # The installers download releases/latest/download/YargNetplay-<Stable|Nightly>.dll and YargMidiFix.dll (one DLL
+      # for both channels; both builds produce it), and the mod's update check reads the latest release.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

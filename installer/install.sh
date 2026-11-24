@@ -4,7 +4,8 @@
 # Run: bash install.sh [<YARG folder>]
 #  or: curl -fsSL https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.sh | bash
 # Run it again any time to update the mod. YARGNETPLAY_DLL=/path/to/YargNetplay.dll installs that file instead of
-# downloading the newest release (offline installs, testing a build).
+# downloading the newest release (offline installs, testing a build); a YargMidiFix.dll next to it is installed too.
+# The YargMidiFix plugin released with the mod is installed alongside it.
 #
 # Native Linux YARG: BepInEx is started by run_bepinex.sh, so this also adds a "YARG (Netplay)" app shortcut.
 # macOS (YARG.app): the same, with a small "YARG (Netplay)" app in ~/Applications that starts run_bepinex.sh.
@@ -24,6 +25,8 @@ WIN_ZIP="BepInEx_win_x64_$BEPINEX_VERSION.zip"
 WIN_SHA256="6c57a714a892efb4e9e1fef63d608a3391f30ec984031c465404e4ee381a0755"
 # One build per YARG channel: YargNetplay-Stable.dll and YargNetplay-Nightly.dll. The same DLL runs on every OS.
 PLUGIN_URL="https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-%s.dll"
+# The MIDI fix plugin, installed alongside. One DLL for both channels.
+MIDIFIX_URL="https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargMidiFix.dll"
 
 step() { printf '\n\033[36m%s\033[0m\n' "$*"; }
 fail() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
@@ -146,6 +149,17 @@ plugin_for() { # channel -> path of the plugin to install (downloaded once per c
     fi
     echo "$file"
 }
+
+# The MIDI fix: a YargMidiFix.dll next to YARGNETPLAY_DLL, or the newest release's. Optional, so failing to get it only
+# warns (releases before it was split out don't have it).
+midifix=""
+if [ -n "${YARGNETPLAY_DLL:-}" ]; then
+    [ -f "$(dirname "$YARGNETPLAY_DLL")/YargMidiFix.dll" ] && midifix="$(dirname "$YARGNETPLAY_DLL")/YargMidiFix.dll"
+else
+    step "Downloading the newest YARG MIDI Fix..."
+    if download "$MIDIFIX_URL" "$tmp/YargMidiFix.dll"; then midifix="$tmp/YargMidiFix.dll"
+    else printf '\033[33m  Couldn'"'"'t download it, skipping.\033[0m\n'; fi
+fi
 
 # Ask about channels up front (before anything is installed).
 channels=()
@@ -275,6 +289,12 @@ EOF
     mkdir -p "$t/BepInEx/plugins/YargNetplay"
     cp -f "$plugin" "$t/BepInEx/plugins/YargNetplay/YargNetplay.dll"
     echo "  Installed YARG Netplay."
+
+    if [ -n "$midifix" ]; then
+        mkdir -p "$t/BepInEx/plugins/YargMidiFix"
+        cp -f "$midifix" "$t/BepInEx/plugins/YargMidiFix/YargMidiFix.dll"
+        echo "  Installed YARG MIDI Fix."
+    fi
 done
 
 printf '\n\033[32mDone.\033[0m\n'

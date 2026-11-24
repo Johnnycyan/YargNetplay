@@ -1,0 +1,20 @@
+<Project>
+  <!-- Shared by YargNetplay.csproj and midifix\YargMidiFix.csproj. -->
+  <PropertyGroup>
+    <!-- Both plugins' versions. CI release builds override it from the tag: -p:Version=1.2.3 -->
+    <Version>0.2.0</Version>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <!-- Compile against the game's own Mono BCL (its mscorlib has Span<T>, which YARG.Core uses). -->
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <NoStdLib>true</NoStdLib>
+    <RestoreAdditionalProjectSources>https://nuget.bepinex.dev/v3/index.json</RestoreAdditionalProjectSources>
+
+    <!-- YARG install to compile against (and deploy into, if BepInEx is installed there).
+         Override with: dotnet build -p:YargDir="C:\path\to\YARG" -->
+    <YargDir Condition="'$(YargDir)' == ''">$(LOCALAPPDATA)\YARC\YARG Installs\cd3bd653-c9f2-420e-a575-5a1ef115cdda\installation</YargDir>
+    <YargManaged>$(YargDir)\YARG_Data\Managed</YargManaged>
+  </PropertyGroup>
+</Project>

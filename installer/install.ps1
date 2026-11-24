@@ -1,4 +1,5 @@
-# YARG Netplay installer: installs BepInEx 5 (if needed) and the newest YargNetplay plugin from GitHub into YARG.
+# YARG Netplay installer: installs BepInEx 5 (if needed) and the newest YargNetplay plugin, plus the YargMidiFix plugin
+# released with it, from GitHub into YARG.
 # Run it through "Install YARG Netplay.bat", or: powershell -ExecutionPolicy Bypass -File install.ps1 [-YargPath <folder>]
 # or straight from GitHub: irm https://github.com/Johnnycyan/YargNetplay/releases/latest/download/install.ps1 | iex
 # Run it again any time to update the mod.
@@ -6,6 +7,7 @@ param(
     # A YARG folder (the one with YARG.exe). Skips the search and the menu.
     [string]$YargPath,
     # Install this YargNetplay.dll instead of downloading the newest release (offline installs, testing a build).
+    # A YargMidiFix.dll in the same folder is installed too.
     [string]$PluginPath
 )
 
@@ -27,6 +29,8 @@ function Fail($text) {
 
 # One build per YARG channel: YargNetplay-Stable.dll and YargNetplay-Nightly.dll.
 $PluginUrl = 'https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargNetplay-{0}.dll'
+# The MIDI fix plugin, installed alongside. One DLL for both channels.
+$MidiFixUrl = 'https://github.com/Johnnycyan/YargNetplay/releases/latest/download/YargMidiFix.dll'
 
 # ------------------------------------------------------------ find YARG
 
@@ -138,6 +142,22 @@ if ($PluginPath) {
     }
 }
 
+# The MIDI fix: a YargMidiFix.dll next to -PluginPath, or the newest release's. Optional, so failing to get it only warns
+# (releases before it was split out don't have it).
+$midiFix = $null
+if ($PluginPath) {
+    $local = Join-Path (Split-Path (Resolve-Path $PluginPath).Path -Parent) 'YargMidiFix.dll'
+    if (Test-Path $local) { $midiFix = $local }
+} else {
+    Write-Step 'Downloading the newest YARG MIDI Fix...'
+    $file = Join-Path ([IO.Path]::GetTempPath()) 'YargMidiFix.dll'
+    try {
+        Invoke-WebRequest -Uri $MidiFixUrl -OutFile $file -UseBasicParsing
+        $midiFix = $file
+        $downloaded += $file
+    } catch { Write-Host "  Couldn't download it, skipping: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
 # ------------------------------------------------------------ BepInEx (downloaded once, only if some target lacks it)
 
 function Test-BepInEx($folder) {
@@ -176,6 +196,13 @@ foreach ($t in $targets) {
     Copy-Item $plugin (Join-Path $pluginDir 'YargNetplay.dll') -Force
     $version = (Get-Item $plugin).VersionInfo.ProductVersion -replace '\+.*'
     Write-Host "  Installed YARG Netplay $version."
+
+    if ($midiFix) {
+        $midiDir = Join-Path $t.Path 'BepInEx\plugins\YargMidiFix'
+        New-Item -ItemType Directory -Force -Path $midiDir | Out-Null
+        Copy-Item $midiFix (Join-Path $midiDir 'YargMidiFix.dll') -Force
+        Write-Host '  Installed YARG MIDI Fix.'
+    }
 }
 
 if ($zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }

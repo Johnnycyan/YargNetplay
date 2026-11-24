@@ -25,6 +25,11 @@ namespace YargNetplay
 
         private static string PluginPath => typeof(Plugin).Assembly.Location;
 
+        // The MIDI fix is a separate plugin released with this one (BepInEx\plugins\YargMidiFix\YargMidiFix.dll).
+        private const string MidiFixName = "YargMidiFix";
+        private static string MidiFixPath =>
+            Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(PluginPath)), MidiFixName, MidiFixName + ".dll");
+
         // The check starts once the main menu has been up this long, so it doesn't land while the game is still
         // loading (the first seconds on the menu are busy with device detection and toasts).
         private const float MenuSettleSeconds = 5f;
@@ -78,7 +83,14 @@ namespace YargNetplay
             NetplayDialogs.ShowUpdateProgress(tag);
             try
             {
-                await Task.Run(() => Download(version, tag));
+                await Task.Run(() =>
+                {
+                    Download(PluginPath, $"YargNetplay-{BuildInfo.Channel}.dll", "YargNetplay", version, tag);
+                    // Also installs it for players who installed the mod before it was split out. Not being able to
+                    // update it mustn't fail the netplay update.
+                    try { Download(MidiFixPath, MidiFixName + ".dll", MidiFixName, version, tag); }
+                    catch (Exception e) { Plugin.Log.LogWarning($"Update: couldn't update the MIDI fix plugin: {e.Message}"); }
+                });
                 Plugin.Log.LogInfo($"Update: installed {tag} ({BuildInfo.Channel}); it takes effect when YARG restarts.");
                 NetplayDialogs.ShowUpdateInstalled(tag);
             }
@@ -90,13 +102,14 @@ namespace YargNetplay
         }
 
         /// <summary>
-        /// Downloads the release DLL next to the plugin, checks it, and swaps it in. Windows won't overwrite a loaded
-        /// DLL but does allow renaming it, so the running one moves aside to ".old" (removed on the next launch).
+        /// Downloads a release DLL next to the plugin it replaces, checks it, and swaps it in. Windows won't overwrite a
+        /// loaded DLL but does allow renaming it, so the running one moves aside to ".old" (removed on the next launch).
         /// </summary>
-        private static void Download(Version version, string tag)
+        private static void Download(string plugin, string asset, string assemblyName, Version version, string tag)
         {
-            string plugin = PluginPath, next = plugin + ".new", old = plugin + ".old";
-            string url = $"https://github.com/{Repository}/releases/download/{tag}/YargNetplay-{BuildInfo.Channel}.dll";
+            string next = plugin + ".new", old = plugin + ".old";
+            string url = $"https://github.com/{Repository}/releases/download/{tag}/{asset}";
+            Directory.CreateDirectory(Path.GetDirectoryName(plugin));
 
             var request = (HttpWebRequest) WebRequest.Create(url);
             request.UserAgent = "YargNetplay/" + Plugin.Version;
@@ -110,16 +123,18 @@ namespace YargNetplay
             AssemblyName name;
             try { name = AssemblyName.GetAssemblyName(next); }
             catch (Exception e) { File.Delete(next); throw new IOException("the download isn't a valid plugin", e); }
-            if (name.Name != "YargNetplay" || name.Version.Major != version.Major || name.Version.Minor != version.Minor
+            if (name.Name != assemblyName || name.Version.Major != version.Major || name.Version.Minor != version.Minor
                 || name.Version.Build != Math.Max(0, version.Build))
             {
                 File.Delete(next);
-                throw new IOException($"the download is {name.Name} {name.Version}, not YARG Netplay {tag}");
+                throw new IOException($"the download is {name.Name} {name.Version}, not {assemblyName} {tag}");
             }
 
             // Left from an earlier update in this same run (still loaded? then YARG must restart first).
             try { if (File.Exists(old)) File.Delete(old); }
             catch (Exception e) { File.Delete(next); throw new IOException("an earlier update is waiting for YARG to restart", e); }
+
+            if (!File.Exists(plugin)) { File.Move(next, plugin); return; } // not installed yet
 
             File.Move(plugin, old);
             try { File.Move(next, plugin); }
@@ -130,10 +145,10 @@ namespace YargNetplay
             }
         }
 
-        /// <summary>Removes what the last update left: the replaced plugin, or a download that was never swapped in.</summary>
+        /// <summary>Removes what the last update left: the replaced plugins, or downloads that were never swapped in.</summary>
         private static void RemoveUpdateLeftovers()
         {
-            foreach (string leftover in new[] { PluginPath + ".old", PluginPath + ".new" })
+            foreach (string leftover in new[] { PluginPath + ".old", PluginPath + ".new", MidiFixPath + ".old", MidiFixPath + ".new" })
             {
                 try { if (File.Exists(leftover)) File.Delete(leftover); }
                 catch (Exception e) { Plugin.Log.LogInfo($"Couldn't remove {leftover}: {e.Message}"); }
