@@ -54,8 +54,6 @@ namespace YargNetplay.UI
         private TMP_Text _folderLabel;
         private TMP_InputField _folderField;
         private ColoredButtonRef _changeFolder, _openFolder;
-        private GameObject _inviteRow;
-        private ColoredButtonRef _copyIp, _copyLanIp;
 
         private readonly List<(OnlineRow Row, TMP_Text Text, Func<string> Label)> _rows = new();
         private string _signature;
@@ -122,7 +120,8 @@ namespace YargNetplay.UI
             _sidebarTitle = sidebar.Find("Header/Profile Name Container/Profile Name").GetComponent<TMP_Text>();
             _editButton = sidebar.Find("Header/Profile Name Container/Edit").gameObject;
             _editButton.GetComponentInChildren<Button>(true).onClick.AddListener(RenameSelectedServer);
-            var picture = sidebar.Find("Header/Profile Picture");
+            // "Profile Picture Container" in newer nightlies.
+            var picture = sidebar.Find("Header/Profile Picture") ?? sidebar.Find("Header/Profile Picture Container");
             if (picture != null) picture.gameObject.SetActive(false);
 
             var options = sidebar.Find("ScrollView/Viewport/Content");
@@ -149,9 +148,6 @@ namespace YargNetplay.UI
             var buttons = sidebar.Find("Buttons");
             BuildFolderRows(options, delayRow, buttons);
 
-            // While hosting, more players can join at any time: keep the addresses to give them at the top.
-            (_inviteRow, _copyIp, _copyLanIp) = AddButtonRow(options, delayRow, buttons, "Invite Buttons", 0);
-
             _delayLabel = delayRow.Find("Option Name").GetComponent<TMP_Text>();
             _delayLabel.richText = true;
             _delayField = delayRow.Find("InputField/Field").GetComponent<TMP_InputField>();
@@ -162,6 +158,43 @@ namespace YargNetplay.UI
             _big = new ColoredButtonRef(buttons.Find("Edit Profile"));
             _left = new ColoredButtonRef(buttons.Find("Add New Device"));
             _right = new ColoredButtonRef(buttons.Find("Remove Device"));
+            AlignWithOptions(buttons, (RectTransform) options);
+        }
+
+        private const float ButtonGap = 10;
+
+        /// <summary>
+        /// Lines the sidebar's own buttons up with the option rows, so they're as wide as the Received Songs buttons.
+        /// Their anchors are offsets made for the older, narrower sidebar: in newer nightlies the half buttons overlap and
+        /// reach past the option rows, which stop short of the scrollbar.
+        /// </summary>
+        private static void AlignWithOptions(Transform buttons, RectTransform options)
+        {
+            // The option rows' left and right edges as insets from the sidebar, which also holds the buttons.
+            var padding = options.GetComponent<LayoutGroup>().padding;
+            float left = padding.left, right = padding.right;
+            for (var t = options; t != buttons.parent; t = (RectTransform) t.parent)
+            {
+                left += t.offsetMin.x;
+                right -= t.offsetMax.x;
+            }
+            var own = (RectTransform) buttons;
+            left -= own.offsetMin.x;
+            right += own.offsetMax.x;
+
+            float middle = (left - right) / 2; // the rows' centre, from the sidebar's centre
+            Place(buttons.Find("Edit Profile"), 0, 1, left, -right);
+            Place(buttons.Find("Add New Device"), 0, 0.5f, left, middle - ButtonGap / 2);
+            Place(buttons.Find("Remove Device"), 0.5f, 1, middle + ButtonGap / 2, -right);
+
+            static void Place(Transform button, float anchorMin, float anchorMax, float offsetMin, float offsetMax)
+            {
+                var rect = (RectTransform) button;
+                rect.anchorMin = new Vector2(anchorMin, rect.anchorMin.y);
+                rect.anchorMax = new Vector2(anchorMax, rect.anchorMax.y);
+                rect.offsetMin = new Vector2(offsetMin, rect.offsetMin.y);
+                rect.offsetMax = new Vector2(offsetMax, rect.offsetMax.y);
+            }
         }
 
         /// <summary>
@@ -194,11 +227,15 @@ namespace YargNetplay.UI
             var row = new GameObject(name, typeof(RectTransform));
             row.transform.SetParent(options, false);
             row.transform.SetSiblingIndex(siblingIndex);
-            ((RectTransform) row.transform).sizeDelta = ((RectTransform) template).sizeDelta;
+            // Newer nightlies size option rows by their LayoutElement and leave the rect's own height at 0.
+            float height = template.GetComponent<LayoutElement>() is { preferredHeight: > 0 } element
+                ? element.preferredHeight
+                : ((RectTransform) template).sizeDelta.y;
+            ((RectTransform) row.transform).sizeDelta = new Vector2(((RectTransform) template).sizeDelta.x, height);
             var layout = row.AddComponent<LayoutElement>();
-            layout.minHeight = layout.preferredHeight = ((RectTransform) template).sizeDelta.y;
+            layout.minHeight = layout.preferredHeight = height;
             var group = row.AddComponent<HorizontalLayoutGroup>();
-            group.spacing = 10;
+            group.spacing = ButtonGap;
             group.childControlWidth = group.childControlHeight = true;
             group.childForceExpandWidth = group.childForceExpandHeight = true;
 
@@ -295,7 +332,7 @@ namespace YargNetplay.UI
             var view = CurrentView(session);
 
             string players = session == null ? "" : string.Join(";", session.Peers.Select(p => p.Id + "=" + p.Name));
-            string signature = $"{view}|{players}|{session?.PortMapping?.State}|{string.Join(";", SavedServers.All.Select(s => s.Name + "@" + s.Address))}";
+            string signature = $"{view}|{players}|{_lanIp}|{session?.PortMapping?.State}|{string.Join(";", SavedServers.All.Select(s => s.Name + "@" + s.Address))}";
             if (force || signature != _signature)
             {
                 _signature = signature;
@@ -348,7 +385,8 @@ namespace YargNetplay.UI
                 int open = Protocol.MaxPlayers - 1 - session.Peers.Count;
                 AddHeader(open <= 0 ? "<size=70%>The game is full.</size>"
                     : $"<size=70%>{(session.Peers.Count == 0 ? "Waiting for players" : $"Room for {open} more")}. " +
-                      $"They join with your IP address and port {Plugin.Port.Value}.</size>");
+                      $"They join with your IP address and port {Plugin.Port.Value}" +
+                      $"{(LanIp is string lan ? $" (on your network: {JoinAddress(lan)})" : "")}.</size>");
                 if (PortMappingText(session.PortMapping) is { } mapping) AddHeader($"<size=70%>{mapping}</size>");
             }
             else if (view == View.Connected)
@@ -401,14 +439,8 @@ namespace YargNetplay.UI
             UpdateDelayRows(session);
             UpdateFolderRows(session, secondary);
 
-            bool hosting = session is { IsHost: true } && view is View.Hosting or View.Connected;
-            _inviteRow.SetActive(hosting);
-            if (hosting)
-            {
-                _copyIp.Set(_fetchingPublicIp ? "Finding IP..." : "Copy IP", CopyPublicAddress, enabled: !_fetchingPublicIp, color: secondary);
-                _copyLanIp.Set("Copy LAN IP", CopyLanAddress, color: secondary);
-            }
             string leave = session is { IsHost: true } ? "Stop Hosting" : "Disconnect";
+            string copyIp = _fetchingPublicIp ? "Finding IP..." : "Copy IP";
 
             switch (view)
             {
@@ -423,8 +455,8 @@ namespace YargNetplay.UI
                 case View.Hosting:
                     _sidebarTitle.text = $"Hosting on port {Plugin.Port.Value}";
                     _big.Set("Stop Hosting", () => session.Dispose(), color: cancel);
-                    _left.Hide();
-                    _right.Hide();
+                    _left.Set(copyIp, CopyPublicAddress, enabled: !_fetchingPublicIp, color: secondary);
+                    _right.Set("Copy LAN IP", CopyLanAddress, color: secondary);
                     _primary = null;
                     break;
 
@@ -440,7 +472,9 @@ namespace YargNetplay.UI
                 case View.Connected when session.PeerInSongSelect is { } there:
                     _sidebarTitle.text = $"{there.Name} is in song select";
                     _big.Set("Go to Song Select", NativeMenus.OpenLibrary, color: colors.ConfirmButton);
-                    _left.Hide();
+                    // More players can still join while hosting; the LAN address is in the player list.
+                    if (session.IsHost) _left.Set(copyIp, CopyPublicAddress, enabled: !_fetchingPublicIp, color: secondary);
+                    else _left.Hide();
                     _right.Set(leave, () => session.Dispose(), color: cancel);
                     _primary = NativeMenus.OpenLibrary;
                     break;
@@ -448,7 +482,7 @@ namespace YargNetplay.UI
                 case View.Connected when session.IsHost:
                     _sidebarTitle.text = $"Playing with {session.OthersText}";
                     _big.Set("Go to Song Select", session.SendEveryoneToSongSelect, enabled: session.EveryoneLobbyReady, color: colors.ConfirmButton);
-                    _left.Hide();
+                    _left.Set(copyIp, CopyPublicAddress, enabled: !_fetchingPublicIp, color: secondary);
                     _right.Set(leave, () => session.Dispose(), color: cancel);
                     _primary = session.EveryoneLobbyReady ? session.SendEveryoneToSongSelect : null;
                     break;
@@ -535,6 +569,30 @@ namespace YargNetplay.UI
         // ------------------------------------------------------------ host address
 
         private bool _fetchingPublicIp;
+
+        private volatile string _lanIp;
+        private bool _lanIpRequested;
+
+        /// <summary>
+        /// This PC's LAN address for the player list, looked up once on a worker thread: Mono's network interface
+        /// queries can take seconds on Windows, which froze the page whenever its list was rebuilt. Null until known.
+        /// </summary>
+        private string LanIp
+        {
+            get
+            {
+                if (!_lanIpRequested)
+                {
+                    _lanIpRequested = true;
+                    System.Threading.Tasks.Task.Run(() =>
+                    {
+                        try { _lanIp = HostAddress.GetLanIp(); }
+                        catch (Exception e) { Plugin.Log.LogWarning("LAN address lookup failed: " + e.Message); }
+                    });
+                }
+                return _lanIp;
+            }
+        }
 
         /// <summary>What the joiner types: the IP, plus the port only when it isn't the default.</summary>
         private static string JoinAddress(string ip) =>

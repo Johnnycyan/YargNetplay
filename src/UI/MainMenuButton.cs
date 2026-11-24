@@ -32,6 +32,9 @@ namespace YargNetplay.UI
         private static readonly AccessTools.FieldRef<NavigationGroup, List<NavigatableBehaviour>> Navigatables =
             AccessTools.FieldRefAccess<NavigationGroup, List<NavigatableBehaviour>>("_navigatables");
 
+        private static readonly AccessTools.FieldRef<NavigationTextColorizer, Color[]> DefaultColors =
+            AccessTools.FieldRefAccess<NavigationTextColorizer, Color[]>("_defaultColors");
+
         private static void Postfix(MainMenu __instance)
         {
             try
@@ -74,6 +77,18 @@ namespace YargNetplay.UI
             {
                 text.text = LABEL;
                 if (below != null) text.color = below.color;
+            }
+            // The colorizer saved the copied (highlighted) color as its unselected one when the clone woke up, and
+            // would put it back on every deselect. Reset it from the entry below's colorizer.
+            var colorizer = clone.GetComponent<NavigationTextColorizer>();
+            var belowColorizer = quickplay.transform.parent.GetChild(clone.transform.GetSiblingIndex() + 1)
+                .GetComponent<NavigationTextColorizer>();
+            if (colorizer != null && belowColorizer != null)
+            {
+                var defaults = DefaultColors(colorizer);
+                var belowDefaults = DefaultColors(belowColorizer);
+                if (defaults != null && belowDefaults is { Length: > 0 })
+                    for (int i = 0; i < defaults.Length; i++) defaults[i] = belowDefaults[0];
             }
 
             var badges = clone.transform.Find("Badge Container");
