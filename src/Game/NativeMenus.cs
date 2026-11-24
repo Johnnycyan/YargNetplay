@@ -36,13 +36,12 @@ namespace YargNetplay.Game
             menu.gameObject.SetActive(true);
         }
 
-        /// <summary>The peer opened difficulty select for these songs: open it here too, with the same songs.</summary>
-        public static void FollowIntoDifficultySelect(List<SongEntry> songs, bool show)
+        /// <summary>Another player opened difficulty select for these songs: open it here too, with the same songs.</summary>
+        public static void FollowIntoDifficultySelect(List<SongEntry> songs, bool show, string playerName)
         {
-            var session = Session.Current;
             if (!InMenuScene)
             {
-                Notify.Info($"{session?.PeerName} is picking a difficulty. Go back to the menu to join in.");
+                Notify.Info($"{playerName} is picking a difficulty. Go back to the menu to join in.");
                 return;
             }
 
@@ -65,8 +64,8 @@ namespace YargNetplay.Game
             finally { Following = false; }
 
             Notify.Info(show
-                ? $"{session?.PeerName} started the setlist. Pick your difficulty."
-                : $"{session?.PeerName} picked {songs[0].Name.Original}. Pick your difficulty.");
+                ? $"{playerName} started the setlist. Pick your difficulty."
+                : $"{playerName} picked {songs[0].Name.Original}. Pick your difficulty.");
         }
 
         /// <summary>The peer backed out of difficulty select: go back to the library too. False when not there.</summary>

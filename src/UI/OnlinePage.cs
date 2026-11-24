@@ -54,6 +54,8 @@ namespace YargNetplay.UI
         private TMP_Text _folderLabel;
         private TMP_InputField _folderField;
         private ColoredButtonRef _changeFolder, _openFolder;
+        private GameObject _inviteRow;
+        private ColoredButtonRef _copyIp, _copyLanIp;
 
         private readonly List<(OnlineRow Row, TMP_Text Text, Func<string> Label)> _rows = new();
         private string _signature;
@@ -147,6 +149,9 @@ namespace YargNetplay.UI
             var buttons = sidebar.Find("Buttons");
             BuildFolderRows(options, delayRow, buttons);
 
+            // While hosting, more players can join at any time: keep the addresses to give them at the top.
+            (_inviteRow, _copyIp, _copyLanIp) = AddButtonRow(options, delayRow, buttons, "Invite Buttons", 0);
+
             _delayLabel = delayRow.Find("Option Name").GetComponent<TMP_Text>();
             _delayLabel.richText = true;
             _delayField = delayRow.Find("InputField/Field").GetComponent<TMP_InputField>();
@@ -179,9 +184,16 @@ namespace YargNetplay.UI
                 if (text != ReceivedSongs.Folder) ChangeFolder(text);
             });
 
-            var row = new GameObject("Received Songs Buttons", typeof(RectTransform));
+            (_, _changeFolder, _openFolder) = AddButtonRow(options, template, buttons, "Received Songs Buttons", folderRow.GetSiblingIndex() + 1);
+        }
+
+        /// <summary>A row of two of the sidebar's half-width buttons among the options, as tall as <paramref name="template"/>.</summary>
+        private static (GameObject Row, ColoredButtonRef Left, ColoredButtonRef Right) AddButtonRow(
+            Transform options, Transform template, Transform buttons, string name, int siblingIndex)
+        {
+            var row = new GameObject(name, typeof(RectTransform));
             row.transform.SetParent(options, false);
-            row.transform.SetSiblingIndex(folderRow.GetSiblingIndex() + 1);
+            row.transform.SetSiblingIndex(siblingIndex);
             ((RectTransform) row.transform).sizeDelta = ((RectTransform) template).sizeDelta;
             var layout = row.AddComponent<LayoutElement>();
             layout.minHeight = layout.preferredHeight = ((RectTransform) template).sizeDelta.y;
@@ -190,8 +202,9 @@ namespace YargNetplay.UI
             group.childControlWidth = group.childControlHeight = true;
             group.childForceExpandWidth = group.childForceExpandHeight = true;
 
-            _changeFolder = new ColoredButtonRef(Instantiate(buttons.Find("Add New Device"), row.transform));
-            _openFolder = new ColoredButtonRef(Instantiate(buttons.Find("Remove Device"), row.transform));
+            return (row,
+                new ColoredButtonRef(Instantiate(buttons.Find("Add New Device"), row.transform)),
+                new ColoredButtonRef(Instantiate(buttons.Find("Remove Device"), row.transform)));
         }
 
         // ------------------------------------------------------------ lifecycle
@@ -281,7 +294,8 @@ namespace YargNetplay.UI
             var session = Session.Current;
             var view = CurrentView(session);
 
-            string signature = $"{view}|{session?.PeerName}|{session?.PortMapping?.State}|{string.Join(";", SavedServers.All.Select(s => s.Name + "@" + s.Address))}";
+            string players = session == null ? "" : string.Join(";", session.Peers.Select(p => p.Id + "=" + p.Name));
+            string signature = $"{view}|{players}|{session?.PortMapping?.State}|{string.Join(";", SavedServers.All.Select(s => s.Name + "@" + s.Address))}";
             if (force || signature != _signature)
             {
                 _signature = signature;
@@ -325,18 +339,30 @@ namespace YargNetplay.UI
             if (session.IsHost)
             {
                 AddRow(() => $"{session.LocalName}   <size=70%><color=#ffd34d>HOST</color></size>   {PartText(PartFilter.LocalPart)}");
-                if (view == View.Connected)
-                    AddRow(() => $"{session.PeerName}   {PingText(session)}   {PeerStatusText(session)}   {PartText(session.PeerPart)}");
-                else
+                foreach (var peer in session.Peers)
                 {
-                    AddHeader($"<size=70%>Waiting for a player. They join with your IP address and port {Plugin.Port.Value}.</size>");
-                    if (PortMappingText(session.PortMapping) is { } mapping) AddHeader($"<size=70%>{mapping}</size>");
+                    var p = peer;
+                    AddRow(() => $"{p.Name}   {PingText(session, p)}   {PeerStatusText(p)}   {PartText(p.Part)}");
                 }
+
+                int open = Protocol.MaxPlayers - 1 - session.Peers.Count;
+                AddHeader(open <= 0 ? "<size=70%>The game is full.</size>"
+                    : $"<size=70%>{(session.Peers.Count == 0 ? "Waiting for players" : $"Room for {open} more")}. " +
+                      $"They join with your IP address and port {Plugin.Port.Value}.</size>");
+                if (PortMappingText(session.PortMapping) is { } mapping) AddHeader($"<size=70%>{mapping}</size>");
             }
             else if (view == View.Connected)
             {
-                AddRow(() => $"{session.PeerName}   <size=70%><color=#ffd34d>HOST</color></size>   {PingText(session)}   {(session.PeerInSongSelect ? InSongSelectText : "")}   {PartText(session.PeerPart)}");
-                AddRow(() => $"{session.LocalName}   <size=70%><color=#9fb3c8>YOU</color></size>   {(session.PeerInSongSelect ? "" : ReadyText(session.LocalLobbyReady))}   {PartText(PartFilter.LocalPart)}");
+                // The host first, then the others in the order they joined, then us.
+                foreach (var peer in session.Peers)
+                {
+                    var p = peer;
+                    if (p.Id == Protocol.HostId)
+                        AddRow(() => $"{p.Name}   <size=70%><color=#ffd34d>HOST</color></size>   {PingText(session, p)}   {(p.InSongSelect ? InSongSelectText : "")}   {PartText(p.Part)}");
+                    else
+                        AddRow(() => $"{p.Name}   {PingText(session, p)}   {PeerStatusText(p)}   {PartText(p.Part)}");
+                }
+                AddRow(() => $"{session.LocalName}   <size=70%><color=#9fb3c8>YOU</color></size>   {(session.PeerInSongSelect != null ? "" : ReadyText(session.LocalLobbyReady))}   {PartText(PartFilter.LocalPart)}");
             }
             else
             {
@@ -354,12 +380,12 @@ namespace YargNetplay.UI
         };
 
         // Without UDP, inputs still arrive over TCP, but a lost packet holds up everything behind it.
-        private static string PingText(Session s) => $"<size=70%><color=#9fb3c8>{s.RttSeconds * 1000:0} ms</color>" +
-                                                     $"{(s.UdpFailed ? "  <color=#ffb84d>TCP ONLY</color>" : "")}</size>";
+        private static string PingText(Session s, Peer p) => $"<size=70%><color=#9fb3c8>{s.PingTo(p) * 1000:0} ms</color>" +
+                                                             $"{(s.UdpFailed(p) ? "  <color=#ffb84d>TCP ONLY</color>" : "")}</size>";
 
         private const string InSongSelectText = "<size=70%><color=#80c0ff>IN SONG SELECT</color></size>";
 
-        private static string PeerStatusText(Session s) => s.PeerInSongSelect ? InSongSelectText : ReadyText(s.PeerLobbyReady);
+        private static string PeerStatusText(Peer p) => p.InSongSelect ? InSongSelectText : ReadyText(p.LobbyReady);
 
         private static string ReadyText(bool ready) => ready
             ? "<size=70%><color=#5ee07a>READY</color></size>"
@@ -375,6 +401,15 @@ namespace YargNetplay.UI
             UpdateDelayRows(session);
             UpdateFolderRows(session, secondary);
 
+            bool hosting = session is { IsHost: true } && view is View.Hosting or View.Connected;
+            _inviteRow.SetActive(hosting);
+            if (hosting)
+            {
+                _copyIp.Set(_fetchingPublicIp ? "Finding IP..." : "Copy IP", CopyPublicAddress, enabled: !_fetchingPublicIp, color: secondary);
+                _copyLanIp.Set("Copy LAN IP", CopyLanAddress, color: secondary);
+            }
+            string leave = session is { IsHost: true } ? "Stop Hosting" : "Disconnect";
+
             switch (view)
             {
                 case View.Idle:
@@ -388,8 +423,8 @@ namespace YargNetplay.UI
                 case View.Hosting:
                     _sidebarTitle.text = $"Hosting on port {Plugin.Port.Value}";
                     _big.Set("Stop Hosting", () => session.Dispose(), color: cancel);
-                    _left.Set(_fetchingPublicIp ? "Finding IP..." : "Copy IP", CopyPublicAddress, enabled: !_fetchingPublicIp, color: secondary);
-                    _right.Set("Copy LAN IP", CopyLanAddress, color: secondary);
+                    _left.Hide();
+                    _right.Hide();
                     _primary = null;
                     break;
 
@@ -401,25 +436,25 @@ namespace YargNetplay.UI
                     _primary = null;
                     break;
 
-                // The other player is already in song select: just go there (nobody needs to be pulled in).
-                case View.Connected when session.PeerInSongSelect:
-                    _sidebarTitle.text = $"{session.PeerName} is in song select";
+                // Another player is already in song select: just go there (nobody needs to be pulled in).
+                case View.Connected when session.PeerInSongSelect is { } there:
+                    _sidebarTitle.text = $"{there.Name} is in song select";
                     _big.Set("Go to Song Select", NativeMenus.OpenLibrary, color: colors.ConfirmButton);
                     _left.Hide();
-                    _right.Set("Disconnect", () => session.Dispose(), color: cancel);
+                    _right.Set(leave, () => session.Dispose(), color: cancel);
                     _primary = NativeMenus.OpenLibrary;
                     break;
 
                 case View.Connected when session.IsHost:
-                    _sidebarTitle.text = $"Playing with {session.PeerName}";
-                    _big.Set("Go to Song Select", session.SendEveryoneToSongSelect, enabled: session.PeerLobbyReady, color: colors.ConfirmButton);
+                    _sidebarTitle.text = $"Playing with {session.OthersText}";
+                    _big.Set("Go to Song Select", session.SendEveryoneToSongSelect, enabled: session.EveryoneLobbyReady, color: colors.ConfirmButton);
                     _left.Hide();
-                    _right.Set("Disconnect", () => session.Dispose(), color: cancel);
-                    _primary = session.PeerLobbyReady ? session.SendEveryoneToSongSelect : null;
+                    _right.Set(leave, () => session.Dispose(), color: cancel);
+                    _primary = session.EveryoneLobbyReady ? session.SendEveryoneToSongSelect : null;
                     break;
 
                 case View.Connected:
-                    _sidebarTitle.text = $"Connected to {session.PeerName}";
+                    _sidebarTitle.text = $"Connected to {session.NameOf(Protocol.HostId)}";
                     _big.Set(session.LocalLobbyReady ? "Not Ready" : "Ready", ToggleReady, color: session.LocalLobbyReady ? cancel : colors.ConfirmButton);
                     _left.Hide();
                     _right.Set("Disconnect", () => session.Dispose(), color: cancel);
@@ -450,7 +485,7 @@ namespace YargNetplay.UI
             if (!_delayField.isFocused)
             {
                 string text = !auto ? Plugin.RemoteDelayMs.Value.ToString()
-                    : session is { IsConnected: true } ? $"{session.RemoteDelaySeconds * 1000:0}"
+                    : session is { IsConnected: true } ? $"{session.MaxRemoteDelaySeconds * 1000:0}"
                     : "";
                 if (_delayField.text != text) _delayField.text = text;
             }

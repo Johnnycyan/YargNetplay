@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -18,11 +19,11 @@ namespace YargNetplay.Net
     internal enum SessionState
     {
         Idle,
-        Hosting,    // listening, no peer yet
+        Hosting,    // listening, nobody joined yet (or everyone left)
         Connecting,
         Lobby,
-        Waiting,    // we confirmed our difficulty and are waiting for the peer to be ready for the same song
-        Loading,    // both ready: gameplay scene loading / waiting at the start gate
+        Waiting,    // we confirmed our difficulty and are waiting for the others to be ready for the same song
+        Loading,    // everyone ready: gameplay scene loading / waiting at the start gate
         InSong,
     }
 
@@ -33,8 +34,13 @@ namespace YargNetplay.Net
         public string Artist;
         public long LengthMilliseconds;
         public bool LocalHas;
-        public bool? PeerHas; // null = waiting for the peer's answer
+        /// <summary>Each other player's answer, by player id. Missing = waiting for their answer.</summary>
+        public readonly Dictionary<byte, bool> PeerHas = new();
         public bool AddedByMe;
+        /// <summary>Name of the player who added it, when it wasn't us.</summary>
+        public string AddedBy;
+        /// <summary>Player id of who added it, when it wasn't us.</summary>
+        public byte AddedById;
     }
 
     internal sealed class PeerSetup
@@ -43,13 +49,51 @@ namespace YargNetplay.Net
         public string EnginePresetJson;
     }
 
+    /// <summary>Another player in the session, as this game knows them.</summary>
+    internal sealed class Peer
+    {
+        public byte Id;
+        public string Name = "a player";
+        public string YargVersion;
+
+        public PartChoice Part;
+        public bool InSongSelect;
+        public bool LobbyReady;
+
+        /// <summary>
+        /// Their round trip to the host (0 for the host itself, whose link to us is our own <see cref="Session.RttSeconds"/>).
+        /// Measured by the host and shared with everyone in <see cref="MsgType.PlayerStats"/>.
+        /// </summary>
+        public double RttSeconds, WorstRttSeconds;
+
+        /// <summary>UDP between them and the host didn't get through (host's view, shared in PlayerStats).</summary>
+        public bool UdpFailed;
+
+        // Ready handshake and the current song
+        public byte[] ReadyHash;
+        public PeerSetup ReadySetup;
+        public bool Loaded;
+        public readonly RemoteInputBuffer Inputs = new();
+
+        // Host only
+        public Connection Conn;
+        public IPAddress Address;
+        public bool Welcomed;
+        public double ConnectedAt;
+        public readonly List<double> RecentRtts = new();
+        public readonly Queue<double> RttHistory = new();
+    }
+
     /// <summary>
-    /// One netplay session with exactly one peer. The host's clock is the reference clock.
-    /// All public members are main-thread only; network threads only touch <see cref="Connection"/>.
+    /// One netplay session. Sessions are a star: the host accepts up to <see cref="Protocol.MaxPlayers"/> - 1 players,
+    /// each connected to the host only, and passes their messages on to each other (see <see cref="Protocol"/>). The
+    /// host's clock is the reference clock.
+    /// All public members are main-thread only; network threads only touch <see cref="Connection"/>, the routing table
+    /// and <see cref="UdpChannel"/>.
     ///
-    /// Song flow: either player opens difficulty select (single song or setlist) and the other follows
+    /// Song flow: any player opens difficulty select (single song or setlist) and the others follow
     /// (<see cref="MsgType.OpenSetlist"/>). Every load of the gameplay scene is held at
-    /// <see cref="TryPassGameplayGate"/> until both players are Ready for the same song, so setlist
+    /// <see cref="TryPassGameplayGate"/> until all players are Ready for the same song, so setlist
     /// continues and score-screen restarts work the same way as the first song.
     /// </summary>
     internal sealed class Session : IDisposable
@@ -72,13 +116,23 @@ namespace YargNetplay.Net
         private const double UDP_REPEAT_WINDOW = 1.0; // inputs older than this (behind the watermark) aren't repeated
         private const double STREAM_MIN_INTERVAL = 0.005;
 
+        private const byte NoId = 254;
+
+        // Host: the listener, players who connected but haven't said Hello yet, and the routing table the read threads
+        // use to pass frames on (welcomed players' connections, by id; replaced whole, never changed in place).
         private TcpListener _listener;
-        private Connection _conn;
         private int _listenPort;
+        private readonly ConcurrentQueue<TcpClient> _accepted = new();
+        private readonly List<Peer> _pending = new();
+        private volatile Connection[] _routes = new Connection[256];
+
+        // Joining player: the connection to the host.
+        private Connection _hostConn;
+        private IPAddress _hostAddress;
+        private string _rejectReason;
 
         /// <summary>Inputs and watermarks also go over UDP when this is set (see <see cref="UdpChannel"/>).</summary>
         private UdpChannel _udp;
-        private IPAddress _peerAddress;
         private double _nextUdpProbe;
         private bool _udpWasAlive;
 
@@ -90,10 +144,10 @@ namespace YargNetplay.Net
         private double _nextStreamSend;
         private bool _inputsSinceStream;
 
-        /// <summary>The UPnP forward of the hosting port, while waiting for a player (null otherwise).</summary>
+        /// <summary>The UPnP forward of the hosting port, while hosting (null otherwise).</summary>
         public PortMapping PortMapping { get; private set; }
         private SongTransfer _transfer;
-        private TcpClient _pendingClient; // set by accept/connect threads, picked up on the main thread
+        private TcpClient _pendingClient; // set by the connect thread, picked up on the main thread
         private string _pendingError;
         private double _nextPing;
         private readonly List<(double rtt, double offset)> _clockSamples = new();
@@ -102,55 +156,79 @@ namespace YargNetplay.Net
 
         public bool IsHost { get; private set; }
 
+        /// <summary>Our player id: <see cref="Protocol.HostId"/> on the host, given by the host when joining.</summary>
+        public byte LocalId { get; private set; } = NoId;
+
         /// <summary>The address the player typed or picked to join (null when hosting).</summary>
         public string JoinAddress { get; private set; }
 
-        /// <summary>Ready toggles on the Online page. The host sends everyone to song select once the peer is ready.</summary>
+        /// <summary>Everyone else in the session, in the order they joined (the host first, for joining players).</summary>
+        public List<Peer> Peers { get; } = new();
+
+        /// <summary>Ready toggle on the Online page. The host sends everyone to song select once all are ready.</summary>
         public bool LocalLobbyReady { get; private set; }
-        public bool PeerLobbyReady { get; private set; }
         public SessionState State { get; private set; }
         public string Status { get; private set; } = "Not connected";
         public string LocalName { get; set; } = Environment.UserName;
-        public string PeerName { get; private set; } = "your partner";
+
+        /// <summary>Our round trip to the host (0 on the host).</summary>
         public double RttSeconds { get; private set; }
 
-        /// <summary>
-        /// Delay picked from the network: half the worst round trip of the last <see cref="RTT_HISTORY"/> pings
-        /// (one second apart), plus a margin for frame timing and jitter, rounded up to 10 ms. Pings sent in the first
-        /// <see cref="RTT_WARMUP"/> seconds of the connection don't count: round trips right after connecting are often much slower.
-        /// </summary>
-        public double AutoDelaySeconds
+        public Peer FindPeer(byte id) => Peers.FirstOrDefault(p => p.Id == id);
+
+        public string NameOf(byte id) => id == LocalId ? LocalName : FindPeer(id)?.Name ?? "a player";
+
+        /// <summary>The other players' names as one phrase ("Alice", "Alice and Bob", "Alice, Bob and Carol").</summary>
+        public string OthersText => NameList(Peers.Select(p => p.Name));
+
+        public static string NameList(IEnumerable<string> names)
         {
-            get
+            var list = names.ToList();
+            return list.Count switch
             {
-                double worstRtt = _rttHistory.Count > 0 ? _rttHistory.Max() : RttSeconds;
-                double ms = Math.Ceiling((worstRtt / 2 + AUTO_DELAY_MARGIN) * 100) * 10;
-                return Math.Max(AUTO_DELAY_MIN_MS, Math.Min(AUTO_DELAY_MAX_MS, ms)) / 1000.0;
-            }
+                0 => "the other players",
+                1 => list[0],
+                _ => string.Join(", ", list.Take(list.Count - 1)) + " and " + list[list.Count - 1],
+            };
         }
 
         /// <summary>
-        /// How far behind the shared song clock the remote player starts each song. With Auto delay on,
+        /// Delay picked from the network for one remote player: half the worst round trip their inputs take to get here,
+        /// plus a margin for frame timing and jitter, rounded up to 10 ms. Inputs travel through the host, so that's our
+        /// round trip to the host plus theirs (each the worst of the last <see cref="RTT_HISTORY"/> pings, one second
+        /// apart). Pings sent in the first <see cref="RTT_WARMUP"/> seconds of a connection don't count: round trips right
+        /// after connecting are often much slower.
+        /// </summary>
+        public double AutoDelaySeconds(Peer peer)
+        {
+            double mine = IsHost ? 0 : _rttHistory.Count > 0 ? _rttHistory.Max() : RttSeconds;
+            double worstRtt = mine + peer.WorstRttSeconds;
+            double ms = Math.Ceiling((worstRtt / 2 + AUTO_DELAY_MARGIN) * 100) * 10;
+            return Math.Max(AUTO_DELAY_MIN_MS, Math.Min(AUTO_DELAY_MAX_MS, ms)) / 1000.0;
+        }
+
+        /// <summary>
+        /// How far behind the shared song clock a remote player starts each song. With Auto delay on,
         /// <see cref="RemoteDriver"/> then adjusts it to the lag it measures.
         /// </summary>
-        public double RemoteDelaySeconds => Plugin.AutoDelay.Value ? AutoDelaySeconds : Plugin.RemoteDelayMs.Value / 1000.0;
+        public double RemoteDelaySeconds(Peer peer) => Plugin.AutoDelay.Value ? AutoDelaySeconds(peer) : Plugin.RemoteDelayMs.Value / 1000.0;
+
+        /// <summary>The longest starting delay of any remote player (shown on the Online page).</summary>
+        public double MaxRemoteDelaySeconds => Peers.Count == 0 ? 0 : Peers.Max(RemoteDelaySeconds);
 
         /// <summary>The shared setlist. Mirrored into YARG's own setlist by <see cref="NativeSetlist"/>.</summary>
         public List<QueueItem> Queue { get; } = new();
 
         // Ready handshake
         private byte[] _localReadyHash;
-        private byte[] _peerReadyHash;
-        private PeerSetup _peerReadySetup;
         private bool _gateOpen;
         private bool _undoShowAdvanceOnCancel;
 
         // Current song
-        public PeerSetup ActivePeerSetup { get; private set; }
+        /// <summary>The setups of the players in the current song, by player id (null outside a song).</summary>
+        public Dictionary<byte, PeerSetup> ActiveSetups { get; private set; }
         public bool LocalLoaded { get; private set; }
-        public bool PeerLoaded { get; private set; }
         public double? StartAtHostTime { get; private set; }
-        public RemoteInputBuffer RemoteInputs { get; } = new();
 
         /// <summary>Host clock offset: hostTime = localTime + offset. Always 0 on the host.</summary>
         private double _clockOffset;
@@ -158,18 +236,26 @@ namespace YargNetplay.Net
         public static double LocalNow => Stopwatch.GetTimestamp() * TicksToSeconds;
         public double HostNow => LocalNow + _clockOffset;
 
-        public bool IsConnected => _conn != null && !_conn.IsClosed;
+        /// <summary>In a session with at least one other player.</summary>
+        public bool IsConnected => IsHost ? Peers.Count > 0 : _hostConn != null && !_hostConn.IsClosed && LocalId != NoId;
 
-        /// <summary>Whether UDP packets from the peer are getting through.</summary>
-        public bool UdpWorking => _udp?.Alive == true;
+        /// <summary>Connected for a while, but no UDP packets got through on the way from this player: their inputs only travel over TCP.</summary>
+        public bool UdpFailed(Peer peer)
+        {
+            if (_udp == null) return IsConnected;
+            if (IsHost) return !_udp.Alive(peer.Id) && LocalNow - peer.ConnectedAt > UDP_GRACE;
+            bool mine = !_udp.Alive(Protocol.HostId) && LocalNow - _connectedAt > UDP_GRACE;
+            return mine || (peer.Id != Protocol.HostId && peer.UdpFailed);
+        }
 
-        /// <summary>Connected for a while, but no UDP packets got through: inputs only travel over TCP.</summary>
-        public bool UdpFailed => IsConnected && !UdpWorking && LocalNow - _connectedAt > UDP_GRACE;
+        /// <summary>Round trip between us and this player (through the host).</summary>
+        public double PingTo(Peer peer) => IsHost ? peer.RttSeconds : RttSeconds + peer.RttSeconds;
+
         public SongTransfer Transfer => _transfer;
         public bool InSongFlow => State is SessionState.Loading or SessionState.InSong;
 
         /// <summary>
-        /// A restart or skip is under way: the song being played is over, but its scene stays up (paused) until both
+        /// A restart or skip is under way: the song being played is over, but its scene stays up (paused) until all
         /// players are ready for the next one.
         /// </summary>
         public bool ChangingSong { get; private set; }
@@ -183,13 +269,13 @@ namespace YargNetplay.Net
         public static Session Host(int port)
         {
             Current?.Dispose();
-            var s = new Session { IsHost = true, _listenPort = port };
+            var s = new Session { IsHost = true, LocalId = Protocol.HostId, _listenPort = port };
             Current = s;
 
             try
             {
                 s._listener = new TcpListener(IPAddress.Any, port);
-                s._listener.Start(1);
+                s._listener.Start(Protocol.MaxPlayers);
             }
             catch (Exception e)
             {
@@ -198,12 +284,23 @@ namespace YargNetplay.Net
             }
 
             s.State = SessionState.Hosting;
-            s.Status = $"Hosting on port {port}, waiting for a player...";
+            s.Status = $"Hosting on port {port}, waiting for players...";
             s.PortMapping = PortMapping.Open(port);
+            // UDP on the hosting port (the one forwarded to us); input packets from one player are passed on to the rest.
+            s._udp = UdpChannel.Open(port, relay: true);
+            s.InitTransfer();
+
+            var listener = s._listener;
             new Thread(() =>
             {
-                try { s._pendingClient = s._listener.AcceptTcpClient(); }
-                catch (Exception e) { if (s.State == SessionState.Hosting) s._pendingError = e.Message; }
+                try
+                {
+                    while (true) s._accepted.Enqueue(listener.AcceptTcpClient());
+                }
+                catch (Exception e)
+                {
+                    if (s._listener == listener) s._pendingError = e.Message;
+                }
             }) { IsBackground = true, Name = "YargNetplay.Accept" }.Start();
             return s;
         }
@@ -249,32 +346,102 @@ namespace YargNetplay.Net
             Notify.Error(message);
         }
 
-        private void StopListening()
+        private void InitTransfer()
         {
-            try { _listener?.Stop(); } catch { /* ignore */ }
-            _listener = null;
+            _transfer = new SongTransfer(SendTo, IsPeerConnected, NameOf);
+            _transfer.SongReceived += OnSongReceived;
         }
+
+        /// <summary>Thread-safe (the song sender's worker asks): whether a player is still in the session.</summary>
+        private bool IsPeerConnected(byte id) => _present[id] && (IsHost ? _routes[id] is { IsClosed: false } : _hostConn is { IsClosed: false });
+
+        /// <summary>Which player ids are in the session, for other threads (replaced whole, never changed in place).</summary>
+        private volatile bool[] _present = new bool[256];
 
         private void Shutdown()
         {
-            StopListening();
-            // The port forward stays up while connected: the peer's UDP packets come in through it.
+            var listener = _listener;
+            _listener = null;
+            try { listener?.Stop(); } catch { /* ignore */ }
+            while (_accepted.TryDequeue(out var client)) client.Close();
+
+            // The port forward stays up while hosting: players' UDP packets come in through it.
             PortMapping?.Close();
             PortMapping = null;
             _udp?.Dispose();
             _udp = null;
             _transfer?.Dispose();
             _transfer = null;
-            _conn?.Dispose();
-            _conn = null;
+            foreach (var peer in Peers.Concat(_pending)) peer.Conn?.Dispose();
+            _pending.Clear();
+            Peers.Clear();
+            _routes = new Connection[256];
+            _present = new bool[256];
+            _hostConn?.Dispose();
+            _hostConn = null;
             State = SessionState.Idle;
             ResetReady();
             ResetLobbyReady();
             NetplayDialogs.CloseWaiting();
             ReceivedLibrary.SetActive(false);
-            PeerPart = default;
-            PeerInSongSelect = false;
             PartFilter.Refresh();
+        }
+
+        // ---------------------------------------------------------------- sending
+
+        /// <summary>To one player. Thread-safe.</summary>
+        public void SendTo(byte to, MsgType type, Action<BinaryWriter> body = null)
+        {
+            if (IsHost) _routes[to]?.Send(type, LocalId, to, body);
+            else _hostConn?.Send(type, LocalId, to, body);
+        }
+
+        /// <summary>To every other player.</summary>
+        public void Broadcast(MsgType type, Action<BinaryWriter> body = null)
+        {
+            if (!IsHost)
+            {
+                _hostConn?.Send(type, LocalId, Protocol.Broadcast, body);
+                return;
+            }
+            foreach (var conn in _routes)
+                conn?.Send(type, LocalId, Protocol.Broadcast, body);
+        }
+
+        /// <summary>
+        /// Host, on a player's read thread: passes the frame on to whoever it's for, and says whether the host handles
+        /// it too. Frames from a player who hasn't been welcomed yet only reach the host.
+        /// </summary>
+        private bool Route(byte from, byte[] frame)
+        {
+            frame[1] = from; // nobody speaks for someone else
+            var routes = _routes;
+            if (routes[from] == null) return true;
+
+            byte to = frame[2];
+            if (to == Protocol.Broadcast)
+            {
+                for (int id = 0; id < routes.Length; id++)
+                    if (id != from) routes[id]?.SendFrame(frame);
+                return true;
+            }
+            if (to == Protocol.HostId) return true;
+            if (to != from) routes[to]?.SendFrame(frame);
+            return false;
+        }
+
+        /// <summary>Call after <see cref="Peers"/> changes.</summary>
+        private void UpdateRoutes()
+        {
+            var routes = new Connection[256];
+            var present = new bool[256];
+            foreach (var peer in Peers)
+            {
+                routes[peer.Id] = peer.Conn;
+                present[peer.Id] = true;
+            }
+            if (IsHost) _routes = routes;
+            _present = present;
         }
 
         // ---------------------------------------------------------------- main-thread pump
@@ -285,87 +452,249 @@ namespace YargNetplay.Net
             {
                 var error = _pendingError;
                 _pendingError = null;
-                Fail("Connection failed: " + error);
+                Fail((IsHost ? "Hosting stopped: " : "Connection failed: ") + error);
                 return;
             }
 
-            if (_pendingClient != null)
-            {
-                var client = _pendingClient;
-                _pendingClient = null;
-                StopListening(); // one peer only
-                OnConnected(client);
-            }
-
-            if (_conn == null) return;
+            if (IsHost) UpdateHost();
+            else if (!UpdateJoined()) return;
 
             // Keep song transfers off the wire while a song is loading or playing.
             if (_transfer != null) _transfer.Paused = InSongFlow;
 
-            while (_conn != null && _conn.Inbox.TryDequeue(out var frame))
-            {
-                try { Handle(frame); }
-                catch (Exception e) { Plugin.Log.LogError($"Bad message: {e}"); }
-            }
-
-            if (_conn == null) return;
-            if (_conn.IsClosed)
-            {
-                Fail("Disconnected: " + _conn.CloseReason);
-                return;
-            }
-
-            if (LocalNow >= _nextPing)
+            if (LocalNow >= _nextPing && (IsConnected || _pending.Count > 0))
             {
                 _nextPing = LocalNow + PING_INTERVAL;
                 double t = LocalNow;
-                _conn.Send(MsgType.Ping, w => w.Write(t));
+                if (IsHost)
+                {
+                    Broadcast(MsgType.Ping, w => w.Write(t));
+                    SendPlayerStats();
+                }
+                else
+                {
+                    SendTo(Protocol.HostId, MsgType.Ping, w => w.Write(t));
+                }
             }
 
             UpdateUdp();
 
             CheckReady();
 
-            // Host: both sides loaded, schedule the shared start.
-            if (IsHost && State == SessionState.Loading && LocalLoaded && PeerLoaded && StartAtHostTime == null)
+            // Host: everyone in the song loaded, schedule the shared start.
+            if (IsHost && State == SessionState.Loading && LocalLoaded && StartAtHostTime == null
+                && SongPeers().All(p => p.Loaded))
             {
-                double startAt = HostNow + START_LEAD_TIME + RttSeconds;
+                double worstRtt = SongPeers().Select(p => p.RttSeconds).DefaultIfEmpty(0).Max();
+                double startAt = HostNow + START_LEAD_TIME + worstRtt;
                 StartAtHostTime = startAt;
-                _conn.Send(MsgType.StartAt, w => w.Write(startAt));
+                Broadcast(MsgType.StartAt, w => w.Write(startAt));
             }
         }
 
-        private void OnConnected(TcpClient client)
+        private void UpdateHost()
         {
-            _peerAddress = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
-            _conn = new Connection(client);
+            if (_listener == null) return;
+
+            while (_accepted.TryDequeue(out var client)) OnAccepted(client);
+
+            foreach (var peer in _pending.ToList())
+            {
+                Drain(peer.Conn);
+                if (peer.Conn.IsClosed) _pending.Remove(peer);
+            }
+
+            foreach (var peer in Peers.ToList())
+            {
+                if (_listener == null) return; // a message ended the session
+                Drain(peer.Conn);
+                if (peer.Conn.IsClosed && Peers.Contains(peer))
+                    RemovePeer(peer, peer.Conn.CloseReason);
+            }
+        }
+
+        /// <summary>Joining player: false once the session ended.</summary>
+        private bool UpdateJoined()
+        {
+            if (_pendingClient != null)
+            {
+                var client = _pendingClient;
+                _pendingClient = null;
+                OnConnectedToHost(client);
+            }
+
+            if (_hostConn == null) return false;
+            Drain(_hostConn);
+            if (_hostConn == null) return false;
+
+            if (_rejectReason != null)
+            {
+                Fail("Couldn't join: " + _rejectReason);
+                return false;
+            }
+            if (_hostConn.IsClosed)
+            {
+                Fail("Disconnected: " + _hostConn.CloseReason);
+                return false;
+            }
+            return true;
+        }
+
+        private void Drain(Connection conn)
+        {
+            // Frames that arrived before a connection closed still count (a Reject, a last LeaveSong).
+            while (conn.Inbox.TryDequeue(out var frame))
+            {
+                try { Handle(frame); }
+                catch (Exception e) { Plugin.Log.LogError($"Bad message: {e}"); }
+                if (IsHost ? _listener == null : _hostConn == null) break; // the session ended
+            }
+        }
+
+        private void OnAccepted(TcpClient client)
+        {
+            byte id = 1;
+            while (id < NoId && Peers.Concat(_pending).Any(p => p.Id == id)) id++;
+            if (id >= NoId)
+            {
+                client.Close();
+                return;
+            }
+
+            var peer = new Peer
+            {
+                Id = id,
+                Address = (client.Client.RemoteEndPoint as IPEndPoint)?.Address,
+                ConnectedAt = LocalNow,
+            };
+            peer.Conn = new Connection(client, (_, frame) => Route(id, frame));
+            _pending.Add(peer);
+            Plugin.Log.LogInfo($"Player {id} connected from {peer.Conn.RemoteEndPoint}");
+        }
+
+        private void OnConnectedToHost(TcpClient client)
+        {
+            _hostAddress = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
+            _hostConn = new Connection(client);
             _connectedAt = LocalNow;
             _rttHistory.Clear();
-            _transfer = new SongTransfer(_conn);
-            _transfer.SongReceived += OnSongReceived;
-            State = SessionState.Lobby;
-            Status = "Connected to " + _conn.RemoteEndPoint + ", saying hello...";
-            ReceivedLibrary.SetActive(true);
+            Status = "Connected to " + _hostConn.RemoteEndPoint + ", saying hello...";
 
-            _conn.Send(MsgType.Hello, w =>
+            _hostConn.Send(MsgType.Hello, NoId, Protocol.HostId, w =>
             {
                 w.Write(Protocol.Version);
                 w.Write(GameInfo.YargVersion);
                 w.Write(Plugin.Version);
                 w.Write(LocalName ?? "Player");
             });
-            SendPartChoice();
-            SendSongSelectState(NativeMenus.InSongSelect);
-            PartFilter.ApplyToProfile(PartFilter.LocalPart);
+        }
 
-            // The host takes UDP on its hosting port (the one forwarded to it); the joining player on any free port.
-            _udp = _peerAddress != null ? UdpChannel.Open(IsHost ? _listenPort : 0) : null;
+        /// <summary>Host: a player said Hello. Turn them away, or bring them in and tell everyone.</summary>
+        private void OnHello(Peer peer, int protocol, string yargVersion, string modVersion, string name)
+        {
+            string reject =
+                protocol != Protocol.Version ? $"netplay version mismatch (host {Plugin.Version}, you {modVersion})"
+                : Peers.Count + 1 >= Protocol.MaxPlayers ? $"the game is full ({Protocol.MaxPlayers} players)"
+                : State is not (SessionState.Hosting or SessionState.Lobby) || SceneManager.GetActiveScene().buildIndex != (int) SceneIndex.Menu
+                    ? "the others are starting or playing a song. Try again when it's over."
+                : null;
+            if (reject != null)
+            {
+                Plugin.Log.LogInfo($"Turned away {name}: {reject}");
+                peer.Conn.Send(MsgType.Reject, LocalId, peer.Id, w => w.Write(reject));
+                peer.Conn.Close("Turned away: " + reject);
+                _pending.Remove(peer);
+                return;
+            }
+
+            peer.Name = name;
+            peer.YargVersion = yargVersion;
+            peer.Welcomed = true;
+            _pending.Remove(peer);
+
+            // Everyone else first, so frames the new player sends once welcomed always come after its PlayerJoined.
+            Broadcast(MsgType.PlayerJoined, w => { w.Write(peer.Id); w.Write(name); w.Write(yargVersion); w.Write(true); });
+
+            var conn = peer.Conn;
+            conn.Send(MsgType.Welcome, LocalId, peer.Id);
+            conn.Send(MsgType.PlayerJoined, LocalId, peer.Id, w => { w.Write(LocalId); w.Write(LocalName ?? "Host"); w.Write(GameInfo.YargVersion); w.Write(false); });
+            foreach (var other in Peers)
+                conn.Send(MsgType.PlayerJoined, LocalId, peer.Id, w => { w.Write(other.Id); w.Write(other.Name); w.Write(other.YargVersion ?? ""); w.Write(false); });
+
+            // The shared setlist so far, in order.
+            foreach (var item in Queue)
+                conn.Send(MsgType.QueueAdd, LocalId, peer.Id, w => WriteQueueAdd(w, item));
+
+            Peers.Add(peer);
+            UpdateRoutes();
+            AnnounceTo(peer.Id);
+
             if (_udp != null)
             {
-                ulong token = _udp.LocalToken;
+                ulong token = _udp.AddPeer(peer.Id);
                 int port = _udp.LocalPort;
-                _conn.Send(MsgType.UdpInfo, w => { w.Write(token); w.Write(port); });
+                SendTo(peer.Id, MsgType.UdpInfo, w => { w.Write(token); w.Write(port); });
             }
+
+            if (State == SessionState.Hosting) State = SessionState.Lobby;
+            UpdateHostStatus();
+            ReceivedLibrary.SetActive(true);
+            PartFilter.Refresh();
+
+            if (yargVersion == GameInfo.YargVersion) Notify.Success($"{name} joined your game");
+            else Notify.Warning($"{name} joined, but runs YARG {yargVersion} (you: {GameInfo.YargVersion}). Scores may not match.");
+        }
+
+        private void UpdateHostStatus()
+        {
+            if (!IsHost) return;
+            Status = Peers.Count == 0 ? $"Hosting on port {_listenPort}, waiting for players..." : $"Playing with {OthersText}";
+        }
+
+        /// <summary>Tells a player who just joined what they need to know about us.</summary>
+        private void AnnounceTo(byte id)
+        {
+            var part = PartFilter.LocalPart;
+            SendTo(id, MsgType.PartChoice, part.Write);
+            bool inSongSelect = NativeMenus.InSongSelect;
+            SendTo(id, MsgType.SongSelectState, w => w.Write(inSongSelect));
+            bool ready = LocalLobbyReady;
+            if (ready) SendTo(id, MsgType.LobbyReady, w => w.Write(true));
+            foreach (var item in Queue.Where(q => q.LocalHas))
+            {
+                var hash = item.Hash;
+                SendTo(id, MsgType.Availability, w => { w.WriteHash(hash); w.Write(true); });
+            }
+        }
+
+        /// <summary>A player left (or their connection dropped). Everyone else carries on.</summary>
+        private void RemovePeer(Peer peer, string reason)
+        {
+            if (!Peers.Remove(peer)) return;
+            Plugin.Log.LogInfo($"{peer.Name} left: {reason}");
+            UpdateRoutes();
+
+            if (IsHost)
+            {
+                peer.Conn?.Dispose();
+                _udp?.RemovePeer(peer.Id);
+                byte id = peer.Id;
+                Broadcast(MsgType.PlayerLeft, w => w.Write(id));
+            }
+
+            _transfer?.OnPeerLeft(peer.Id, peer.Name);
+            foreach (var item in Queue) item.PeerHas.Remove(peer.Id);
+            Notify.Warning($"{peer.Name} left the game");
+
+            if (Peers.Count == 0)
+            {
+                // Nobody to wait for any more. A song already under way just carries on.
+                if (State == SessionState.Waiting) CancelReady();
+                ResetLobbyReady();
+                if (IsHost && State == SessionState.Lobby) State = SessionState.Hosting;
+            }
+            UpdateHostStatus();
+            PartFilter.Refresh();
         }
 
         // ---------------------------------------------------------------- UDP
@@ -374,70 +703,74 @@ namespace YargNetplay.Net
         {
             if (_udp == null) return;
 
-            while (_udp != null && _udp.TryReceive(out byte kind, out var r))
+            while (_udp != null && _udp.TryReceive(out byte from, out byte kind, out var r))
             {
-                try { HandleUdp(kind, r); }
+                try { HandleUdp(from, kind, r); }
                 catch (Exception e) { Plugin.Log.LogWarning($"Bad UDP packet: {e.Message}"); }
             }
 
-            if (_udp == null || !_udp.HasPeer) return;
+            if (_udp == null) return;
 
-            bool alive = _udp.Alive;
-            if (alive != _udpWasAlive)
+            if (!IsHost && _udp.HasAddress(Protocol.HostId))
             {
-                _udpWasAlive = alive;
-                Plugin.Log.LogInfo(alive ? "UDP: packets from the peer are getting through" : "UDP: no packets from the peer lately; inputs use TCP only");
+                bool alive = _udp.Alive(Protocol.HostId);
+                if (alive != _udpWasAlive)
+                {
+                    _udpWasAlive = alive;
+                    Plugin.Log.LogInfo(alive ? "UDP: packets from the host are getting through" : "UDP: no packets from the host lately; inputs use TCP only");
+                }
             }
 
-            // Probes open the way through both NATs and keep it open. During songs the input packets do that.
+            // Probes open the way through the NATs and keep it open. During songs the input packets do that.
             if (LocalNow >= _nextUdpProbe)
             {
+                bool alive = IsHost ? Peers.All(p => _udp.Alive(p.Id)) : _udp.Alive(Protocol.HostId);
                 _nextUdpProbe = LocalNow + (alive ? UDP_KEEPALIVE_INTERVAL : UDP_PROBE_INTERVAL);
-                _udp.Send(UdpChannel.KindProbe);
+                _udp.SendAll(UdpChannel.KindProbe);
             }
         }
 
-        private void HandleUdp(byte kind, BinaryReader r)
+        private void HandleUdp(byte from, byte kind, BinaryReader r)
         {
             if (kind != UdpChannel.KindInputs) return; // probes only show the way is open
 
+            byte player = r.ReadByte();
             double songKey = r.ReadDouble();
             int lastSeq = r.ReadInt32();
             double mark = r.ReadDouble();
             int count = r.ReadByte();
 
+            // The host takes a player's own inputs only; everyone else gets them through the host.
+            if (IsHost ? player != from : from != Protocol.HostId) return;
             // From an earlier song (UDP can arrive late), or the song isn't set up here yet: TCP brings it anyway.
-            if (StartAtHostTime != songKey || !InSongFlow) return;
+            if (StartAtHostTime != songKey || !InSongFlow || FindPeer(player) is not Peer peer) return;
 
             for (int i = 0; i < count; i++)
             {
                 double time = r.ReadDouble();
                 int action = r.ReadInt32();
                 int value = r.ReadInt32();
-                RemoteInputs.Add(lastSeq - count + 1 + i, new GameInput(time, action, value));
+                peer.Inputs.Add(lastSeq - count + 1 + i, new GameInput(time, action, value));
             }
-            RemoteInputs.SetWatermark(lastSeq, mark);
+            peer.Inputs.SetWatermark(lastSeq, mark);
         }
 
         // ---------------------------------------------------------------- song select presence
 
-        /// <summary>Whether the peer is in song select, so we can join them there without them pulling us in.</summary>
-        public bool PeerInSongSelect { get; private set; }
+        /// <summary>Another player who is in song select, so we can join them there without them pulling us in.</summary>
+        public Peer PeerInSongSelect => Peers.FirstOrDefault(p => p.InSongSelect);
 
         public void SendSongSelectState(bool inSongSelect)
         {
-            if (IsConnected) _conn.Send(MsgType.SongSelectState, w => w.Write(inSongSelect));
+            if (IsConnected) Broadcast(MsgType.SongSelectState, w => w.Write(inSongSelect));
         }
 
         // ---------------------------------------------------------------- preferred parts (library filter)
 
-        /// <summary>The peer's preferred part (Any until they tell us). Ours is <see cref="PartFilter.LocalPart"/>.</summary>
-        public PartChoice PeerPart { get; private set; }
-
         public void SendPartChoice()
         {
             var part = PartFilter.LocalPart;
-            if (IsConnected) _conn.Send(MsgType.PartChoice, part.Write);
+            if (IsConnected) Broadcast(MsgType.PartChoice, part.Write);
         }
 
         // ---------------------------------------------------------------- incoming
@@ -446,41 +779,66 @@ namespace YargNetplay.Net
         {
             using var r = new BinaryReader(new MemoryStream(frame));
             var type = (MsgType) r.ReadByte();
+            byte from = r.ReadByte();
+            byte to = r.ReadByte();
+
+            if (IsHost)
+            {
+                var pending = _pending.FirstOrDefault(p => p.Id == from);
+                if (pending != null)
+                {
+                    // Nothing counts before Hello.
+                    if (type == MsgType.Hello)
+                        OnHello(pending, r.ReadInt32(), r.ReadString(), r.ReadString(), r.ReadString());
+                    return;
+                }
+            }
+
+            var peer = FindPeer(from);
+
+            // Session membership only comes from the host (another player's copy would be passed on with their id).
+            bool fromHost = !IsHost && from == Protocol.HostId;
+            if (type is MsgType.Reject or MsgType.Welcome or MsgType.PlayerJoined or MsgType.PlayerLeft or MsgType.PlayerStats
+                && !fromHost)
+                return;
 
             switch (type)
             {
-                case MsgType.Hello:
+                case MsgType.Reject:
+                    _rejectReason = r.ReadString();
+                    break;
+
+                case MsgType.Welcome:
+                    OnWelcome(to);
+                    break;
+
+                case MsgType.PlayerJoined:
                 {
-                    int protocol = r.ReadInt32();
+                    byte id = r.ReadByte();
+                    string name = r.ReadString();
                     string yargVersion = r.ReadString();
-                    string modVersion = r.ReadString();
-                    PeerName = r.ReadString();
+                    bool isNew = r.ReadBoolean();
+                    OnPlayerJoined(id, name, yargVersion, isNew);
+                    break;
+                }
 
-                    if (protocol != Protocol.Version)
+                case MsgType.PlayerLeft:
+                    if (FindPeer(r.ReadByte()) is Peer left) RemovePeer(left, "left the session");
+                    break;
+
+                case MsgType.PlayerStats:
+                {
+                    int count = r.ReadByte();
+                    for (int i = 0; i < count; i++)
                     {
-                        _conn.Close($"Netplay version mismatch (you {Protocol.Version}, {PeerName} {protocol}, mod {modVersion})");
-                        return;
+                        byte id = r.ReadByte();
+                        double rtt = r.ReadSingle(), worst = r.ReadSingle();
+                        bool udpFailed = r.ReadBoolean();
+                        if (id == LocalId || FindPeer(id) is not Peer p) continue;
+                        p.RttSeconds = rtt;
+                        p.WorstRttSeconds = worst;
+                        p.UdpFailed = udpFailed;
                     }
-
-                    if (!IsHost) SavedServers.RememberJoin(JoinAddress, PeerName);
-
-                    // Engines must match exactly or the remote simulation drifts.
-                    if (yargVersion == GameInfo.YargVersion)
-                    {
-                        Status = $"Connected to {PeerName}";
-                        Notify.Success(IsHost ? $"{PeerName} joined your game" : $"Connected to {PeerName}");
-                    }
-                    else
-                    {
-                        Status = $"Connected to {PeerName} - WARNING: YARG version differs ({GameInfo.YargVersion} vs {yargVersion})";
-                        Notify.Warning($"Connected to {PeerName}, but they run YARG {yargVersion} (you: {GameInfo.YargVersion}). Scores may not match.");
-                    }
-
-                    // Re-announce our setlist so a reconnect shows both sides' songs, and share any
-                    // setlist that was built before connecting.
-                    foreach (var item in Queue.Where(q => q.AddedByMe))
-                        SendQueueAdd(item);
-                    NativeSetlist.ResyncIfOpen();
                     break;
                 }
 
@@ -488,63 +846,58 @@ namespace YargNetplay.Net
                 {
                     double t = r.ReadDouble();
                     double now = LocalNow;
-                    _conn.Send(MsgType.Pong, w => { w.Write(t); w.Write(now); });
+                    SendTo(from, MsgType.Pong, w => { w.Write(t); w.Write(now); });
                     break;
                 }
 
                 case MsgType.Pong:
-                {
-                    double sent = r.ReadDouble();
-                    double peerTime = r.ReadDouble();
-                    double now = LocalNow;
-                    double rtt = now - sent;
-
-                    _clockSamples.Add((rtt, peerTime - (sent + rtt / 2)));
-                    if (_clockSamples.Count > CLOCK_SAMPLES) _clockSamples.RemoveAt(0);
-                    if (sent >= _connectedAt + RTT_WARMUP)
-                    {
-                        _rttHistory.Enqueue(rtt);
-                        if (_rttHistory.Count > RTT_HISTORY) _rttHistory.Dequeue();
-                    }
-
-                    // The lowest-RTT sample has the least queuing noise.
-                    var best = _clockSamples.OrderBy(s => s.rtt).First();
-                    RttSeconds = best.rtt;
-                    if (!IsHost) _clockOffset = best.offset;
+                    OnPong(peer, r.ReadDouble(), r.ReadDouble());
                     break;
-                }
+            }
 
+            // Everything else comes from a player we know.
+            if (peer == null) return;
+
+            switch (type)
+            {
                 case MsgType.QueueAdd:
                 {
                     var hash = r.ReadHash();
                     string name = r.ReadString();
                     string artist = r.ReadString();
                     long length = r.ReadInt64();
+                    byte addedBy = r.ReadByte();
 
                     var item = FindQueueItem(hash);
-                    if (item == null)
+                    bool isNew = item == null;
+                    if (isNew)
                     {
-                        item = new QueueItem { Hash = hash, Name = name, Artist = artist, LengthMilliseconds = length };
+                        item = new QueueItem
+                        {
+                            Hash = hash, Name = name, Artist = artist, LengthMilliseconds = length,
+                            AddedByMe = addedBy == LocalId, AddedBy = NameOf(addedBy), AddedById = addedBy,
+                        };
                         Queue.Add(item);
                     }
-                    item.PeerHas = true;
+                    if (from == addedBy) item.PeerHas[from] = true;
                     item.LocalHas = SongLibrary.TryGet(hash, out var song);
 
                     bool has = item.LocalHas;
-                    _conn.Send(MsgType.Availability, w => { w.WriteHash(hash); w.Write(has); });
+                    Broadcast(MsgType.Availability, w => { w.WriteHash(hash); w.Write(has); });
 
                     // The open setlist overlay already shows the new song, who added it and its download state.
-                    bool announce = !SetlistOverlay.ListShowing;
+                    // Songs that were already in the setlist before we joined aren't news.
+                    bool announce = isNew && from == addedBy && !SetlistOverlay.ListShowing;
                     if (has)
                     {
                         NativeSetlist.Add(song);
-                        if (announce) Notify.Info($"{PeerName} added {name} to the setlist");
+                        if (announce) Notify.Info($"{peer.Name} added {name} to the setlist");
                     }
                     else
                     {
-                        // Missing it: have the peer send it straight away.
-                        _transfer.Request(hash);
-                        if (announce) Notify.Info($"{PeerName} added {name}. You don't have it, downloading...");
+                        // Missing it: have someone who has it send it straight away.
+                        RequestSong(item);
+                        if (announce) Notify.Info($"{peer.Name} added {name}. You don't have it, downloading...");
                     }
                     break;
                 }
@@ -569,7 +922,7 @@ namespace YargNetplay.Net
                     var order = new List<QueueItem>(count);
                     for (int i = 0; i < count; i++)
                         if (FindQueueItem(r.ReadHash()) is QueueItem listed && !order.Contains(listed)) order.Add(listed);
-                    // Anything the peer didn't list (added here in the meantime) keeps its place after the listed songs.
+                    // Anything the sender didn't list (added here in the meantime) keeps its place after the listed songs.
                     order.AddRange(Queue.Where(q => !order.Contains(q)));
                     Queue.Clear();
                     Queue.AddRange(order);
@@ -581,28 +934,32 @@ namespace YargNetplay.Net
                 {
                     var item = FindQueueItem(r.ReadHash());
                     bool has = r.ReadBoolean();
-                    if (item != null) item.PeerHas = has;
+                    if (item == null) break;
+                    item.PeerHas[from] = has;
+                    // Someone has a song we're missing and haven't asked anyone for yet.
+                    if (has && !item.LocalHas && _transfer?.GetIncoming(item.Hash) == null)
+                        _transfer?.Request(item.Hash, from);
                     break;
                 }
 
                 case MsgType.SongRequest:
-                    _transfer.OnRequest(r.ReadHash());
+                    _transfer?.OnRequest(r.ReadHash(), from);
                     break;
 
                 case MsgType.SongBegin:
-                    _transfer.OnBegin(r);
+                    _transfer?.OnBegin(r, from);
                     break;
 
                 case MsgType.SongChunk:
-                    _transfer.OnChunk(r);
+                    _transfer?.OnChunk(r, from);
                     break;
 
                 case MsgType.SongEnd:
-                    _transfer.OnEnd(r);
+                    _transfer?.OnEnd(r, from);
                     break;
 
                 case MsgType.SongFail:
-                    _transfer.OnFail(r);
+                    _transfer?.OnFail(r, from);
                     break;
 
                 case MsgType.OpenSetlist:
@@ -611,15 +968,15 @@ namespace YargNetplay.Net
                     int count = r.ReadInt32();
                     var hashes = new List<byte[]>(count);
                     for (int i = 0; i < count; i++) hashes.Add(r.ReadHash());
-                    OnPeerOpenedSetlist(show, hashes);
+                    OnPeerOpenedSetlist(peer, show, hashes);
                     break;
                 }
 
                 case MsgType.Ready:
                 {
-                    _peerReadyHash = r.ReadHash();
+                    peer.ReadyHash = r.ReadHash();
                     int len = r.ReadInt32();
-                    _peerReadySetup = new PeerSetup
+                    peer.ReadySetup = new PeerSetup
                     {
                         ProfileBytes = r.ReadBytes(len),
                         EnginePresetJson = r.ReadString(),
@@ -628,31 +985,31 @@ namespace YargNetplay.Net
                 }
 
                 case MsgType.Unready:
-                    _peerReadyHash = null;
-                    _peerReadySetup = null;
+                    peer.ReadyHash = null;
+                    peer.ReadySetup = null;
                     if (State == SessionState.Waiting)
-                        Notify.Warning($"{PeerName} backed out");
+                        Notify.Warning($"{peer.Name} backed out");
                     break;
 
                 case MsgType.LeaveSetlist:
-                    OnPeerLeftSetlist();
+                    OnPeerLeftSetlist(peer);
                     break;
 
                 case MsgType.PartChoice:
-                    PeerPart = PartChoice.Read(r);
+                    peer.Part = PartChoice.Read(r);
                     PartFilter.Refresh();
                     break;
 
                 case MsgType.SongSelectState:
-                    PeerInSongSelect = r.ReadBoolean();
+                    peer.InSongSelect = r.ReadBoolean();
                     break;
 
                 case MsgType.Loaded:
-                    PeerLoaded = true;
+                    peer.Loaded = true;
                     break;
 
                 case MsgType.StartAt:
-                    StartAtHostTime = r.ReadDouble();
+                    if (from == Protocol.HostId) StartAtHostTime = r.ReadDouble();
                     break;
 
                 case MsgType.Input:
@@ -661,7 +1018,7 @@ namespace YargNetplay.Net
                     double time = r.ReadDouble();
                     int action = r.ReadInt32();
                     int value = r.ReadInt32();
-                    RemoteInputs.Add(seq, new GameInput(time, action, value));
+                    peer.Inputs.Add(seq, new GameInput(time, action, value));
                     break;
                 }
 
@@ -669,7 +1026,7 @@ namespace YargNetplay.Net
                 {
                     int lastSeq = r.ReadInt32();
                     double mark = r.ReadDouble();
-                    RemoteInputs.SetWatermark(lastSeq, mark);
+                    peer.Inputs.SetWatermark(lastSeq, mark);
                     break;
                 }
 
@@ -677,7 +1034,8 @@ namespace YargNetplay.Net
                 {
                     ulong token = r.ReadUInt64();
                     int port = r.ReadInt32();
-                    _udp?.SetPeer(_peerAddress, port, token);
+                    if (IsHost) _udp?.SetPeerAddress(peer.Id, peer.Address, port, token);
+                    else if (from == Protocol.HostId) _udp?.SetPeerAddress(Protocol.HostId, _hostAddress, port, token);
                     break;
                 }
 
@@ -690,11 +1048,11 @@ namespace YargNetplay.Net
                     break;
 
                 case MsgType.LeaveSong:
-                    // Leaving while a restart or skip waits for both players: drop the wait, then leave.
+                    // Leaving while a restart or skip waits for everyone: drop the wait, then leave.
                     if (ChangingSong) CancelReady(leaveSong: false);
                     Notify.Warning(GameHooks.ApplyRemoteLeave()
-                        ? $"{PeerName} left the song. Back to the library."
-                        : $"{PeerName} left the song");
+                        ? $"{peer.Name} left the song. Back to the library."
+                        : $"{peer.Name} left the song");
                     break;
 
                 case MsgType.ChangeSong:
@@ -702,21 +1060,141 @@ namespace YargNetplay.Net
                     int index = r.ReadInt32();
                     var hash = r.ReadHash();
                     bool skip = r.ReadBoolean();
-                    OnPeerChangedSong(index, hash, skip);
+                    OnPeerChangedSong(peer, index, hash, skip);
                     break;
                 }
 
                 case MsgType.LobbyReady:
-                    PeerLobbyReady = r.ReadBoolean();
-                    if (IsHost && PeerLobbyReady) Notify.Info($"{PeerName} is ready");
+                    peer.LobbyReady = r.ReadBoolean();
+                    if (IsHost && peer.LobbyReady) Notify.Info($"{peer.Name} is ready");
                     break;
 
                 case MsgType.GoToSongSelect:
+                    if (from != Protocol.HostId) break;
                     ResetLobbyReady();
                     NativeMenus.OpenLibrary();
-                    Notify.Info($"{PeerName} opened song select. Add songs to the setlist or pick one.");
+                    Notify.Info($"{peer.Name} opened song select. Add songs to the setlist or pick one.");
                     break;
             }
+        }
+
+        /// <summary>Joining player: the host let us in and gave us our id.</summary>
+        private void OnWelcome(byte id)
+        {
+            if (IsHost || LocalId != NoId) return;
+            LocalId = id;
+            State = SessionState.Lobby;
+            ReceivedLibrary.SetActive(true);
+
+            // The joining player takes UDP on any free port.
+            _udp = UdpChannel.Open(0, relay: false);
+            if (_udp != null)
+            {
+                ulong token = _udp.AddPeer(Protocol.HostId);
+                int port = _udp.LocalPort;
+                SendTo(Protocol.HostId, MsgType.UdpInfo, w => { w.Write(token); w.Write(port); });
+            }
+            InitTransfer();
+
+            SendPartChoice();
+            SendSongSelectState(NativeMenus.InSongSelect);
+            PartFilter.ApplyToProfile(PartFilter.LocalPart);
+        }
+
+        private void OnPlayerJoined(byte id, string name, string yargVersion, bool isNew)
+        {
+            if (IsHost || id == LocalId) return;
+            var peer = FindPeer(id);
+            if (peer == null)
+            {
+                Peers.Add(peer = new Peer { Id = id });
+                UpdateRoutes();
+            }
+            peer.Name = name;
+            peer.YargVersion = yargVersion;
+
+            if (id == Protocol.HostId)
+            {
+                SavedServers.RememberJoin(JoinAddress, name);
+
+                // Engines must match exactly or the remote simulation drifts.
+                if (yargVersion == GameInfo.YargVersion)
+                {
+                    Status = $"Connected to {name}";
+                    Notify.Success($"Connected to {name}");
+                }
+                else
+                {
+                    Status = $"Connected to {name} - WARNING: YARG version differs ({GameInfo.YargVersion} vs {yargVersion})";
+                    Notify.Warning($"Connected to {name}, but they run YARG {yargVersion} (you: {GameInfo.YargVersion}). Scores may not match.");
+                }
+
+                // Share any setlist that was built before connecting (or kept from an earlier session). The host
+                // sends the setlist so far right after this, and duplicates merge.
+                foreach (var item in Queue.Where(q => q.AddedByMe).ToList())
+                    SendQueueAdd(item);
+                NativeSetlist.ResyncIfOpen();
+            }
+            else if (isNew)
+            {
+                AnnounceTo(id);
+                if (yargVersion == GameInfo.YargVersion) Notify.Info($"{name} joined the game");
+                else Notify.Warning($"{name} joined, but runs YARG {yargVersion} (you: {GameInfo.YargVersion}). Scores may not match.");
+            }
+            PartFilter.Refresh();
+        }
+
+        private void OnPong(Peer peer, double sent, double peerTime)
+        {
+            double now = LocalNow;
+            double rtt = now - sent;
+
+            if (IsHost)
+            {
+                if (peer == null) return;
+                peer.RecentRtts.Add(rtt);
+                if (peer.RecentRtts.Count > CLOCK_SAMPLES) peer.RecentRtts.RemoveAt(0);
+                if (sent >= peer.ConnectedAt + RTT_WARMUP)
+                {
+                    peer.RttHistory.Enqueue(rtt);
+                    if (peer.RttHistory.Count > RTT_HISTORY) peer.RttHistory.Dequeue();
+                }
+                peer.RttSeconds = peer.RecentRtts.Min();
+                peer.WorstRttSeconds = peer.RttHistory.Count > 0 ? peer.RttHistory.Max() : peer.RttSeconds;
+                return;
+            }
+
+            if (peer?.Id != Protocol.HostId) return;
+            _clockSamples.Add((rtt, peerTime - (sent + rtt / 2)));
+            if (_clockSamples.Count > CLOCK_SAMPLES) _clockSamples.RemoveAt(0);
+            if (sent >= _connectedAt + RTT_WARMUP)
+            {
+                _rttHistory.Enqueue(rtt);
+                if (_rttHistory.Count > RTT_HISTORY) _rttHistory.Dequeue();
+            }
+
+            // The lowest-RTT sample has the least queuing noise.
+            var best = _clockSamples.OrderBy(s => s.rtt).First();
+            RttSeconds = best.rtt;
+            _clockOffset = best.offset;
+        }
+
+        /// <summary>Host: everyone's connection to the host, for the player list and each player's remote delays.</summary>
+        private void SendPlayerStats()
+        {
+            if (Peers.Count == 0) return;
+            var stats = Peers.Select(p => (p.Id, (float) p.RttSeconds, (float) p.WorstRttSeconds, UdpFailed(p))).ToList();
+            Broadcast(MsgType.PlayerStats, w =>
+            {
+                w.Write((byte) stats.Count);
+                foreach (var (id, rtt, worst, udpFailed) in stats)
+                {
+                    w.Write(id);
+                    w.Write(rtt);
+                    w.Write(worst);
+                    w.Write(udpFailed);
+                }
+            });
         }
 
         // ---------------------------------------------------------------- lobby
@@ -725,14 +1203,17 @@ namespace YargNetplay.Net
         {
             if (!IsConnected || LocalLobbyReady == ready) return;
             LocalLobbyReady = ready;
-            _conn.Send(MsgType.LobbyReady, w => w.Write(ready));
+            Broadcast(MsgType.LobbyReady, w => w.Write(ready));
         }
 
-        /// <summary>Host: send both players to song select (Quickplay).</summary>
+        /// <summary>Host: whether every other player is ready (or already in song select).</summary>
+        public bool EveryoneLobbyReady => Peers.Count > 0 && Peers.All(p => p.LobbyReady || p.InSongSelect);
+
+        /// <summary>Host: send everyone to song select (Quickplay).</summary>
         public void SendEveryoneToSongSelect()
         {
             if (!IsConnected || !IsHost) return;
-            _conn.Send(MsgType.GoToSongSelect);
+            Broadcast(MsgType.GoToSongSelect);
             ResetLobbyReady();
             NativeMenus.OpenLibrary();
         }
@@ -740,7 +1221,7 @@ namespace YargNetplay.Net
         private void ResetLobbyReady()
         {
             LocalLobbyReady = false;
-            PeerLobbyReady = false;
+            foreach (var peer in Peers) peer.LobbyReady = false;
         }
 
         // ---------------------------------------------------------------- shared setlist
@@ -771,7 +1252,7 @@ namespace YargNetplay.Net
             var item = FindQueueItem(hash);
             if (item == null) return;
             Queue.Remove(item);
-            if (IsConnected) _conn.Send(MsgType.QueueRemove, w => w.WriteHash(hash));
+            if (IsConnected) Broadcast(MsgType.QueueRemove, w => w.WriteHash(hash));
         }
 
         /// <summary>Moves a song up (-1) or down (+1) in the shared setlist. False when it can't move that way.</summary>
@@ -801,7 +1282,7 @@ namespace YargNetplay.Net
         {
             if (!IsConnected) return;
             var hashes = Queue.Select(q => q.Hash).ToList();
-            _conn.Send(MsgType.QueueOrder, w =>
+            Broadcast(MsgType.QueueOrder, w =>
             {
                 w.Write(hashes.Count);
                 foreach (var hash in hashes) w.WriteHash(hash);
@@ -812,19 +1293,30 @@ namespace YargNetplay.Net
         {
             if (Queue.Count == 0) return;
             Queue.Clear();
-            if (IsConnected) _conn.Send(MsgType.QueueClear);
+            if (IsConnected) Broadcast(MsgType.QueueClear);
         }
 
         public void RetryTransfer(QueueItem item)
         {
-            if (IsConnected && !item.LocalHas && item.PeerHas == true) _transfer.Request(item.Hash);
+            if (IsConnected && !item.LocalHas) RequestSong(item);
+        }
+
+        /// <summary>Asks a player who has this song to send it: whoever added it if they're still here, else anyone who has it.</summary>
+        private void RequestSong(QueueItem item)
+        {
+            if (_transfer == null) return;
+            var source = !item.AddedByMe && FindPeer(item.AddedById) is Peer adder && item.PeerHas.TryGetValue(adder.Id, out bool adderHas) && adderHas
+                ? adder
+                : Peers.FirstOrDefault(p => item.PeerHas.TryGetValue(p.Id, out bool has) && has);
+            // Nobody known to have it yet: their Availability will ask for it.
+            if (source != null) _transfer.Request(item.Hash, source.Id);
         }
 
         private void OnSongReceived(byte[] hash)
         {
             var item = FindQueueItem(hash);
             if (item != null) item.LocalHas = true;
-            _conn?.Send(MsgType.Availability, w => { w.WriteHash(hash); w.Write(true); });
+            if (IsConnected) Broadcast(MsgType.Availability, w => { w.WriteHash(hash); w.Write(true); });
 
             ReceivedLibrary.Refresh();
             if (SongLibrary.TryGet(hash, out var song))
@@ -835,25 +1327,25 @@ namespace YargNetplay.Net
             }
         }
 
-        private void SendQueueAdd(QueueItem item)
+        private void SendQueueAdd(QueueItem item) => Broadcast(MsgType.QueueAdd, w => WriteQueueAdd(w, item));
+
+        private void WriteQueueAdd(BinaryWriter w, QueueItem item)
         {
-            _conn.Send(MsgType.QueueAdd, w =>
-            {
-                w.WriteHash(item.Hash);
-                w.Write(item.Name ?? "");
-                w.Write(item.Artist ?? "");
-                w.Write(item.LengthMilliseconds);
-            });
+            w.WriteHash(item.Hash);
+            w.Write(item.Name ?? "");
+            w.Write(item.Artist ?? "");
+            w.Write(item.LengthMilliseconds);
+            w.Write(item.AddedByMe ? LocalId : item.AddedById);
         }
 
         // ---------------------------------------------------------------- following each other into difficulty select
 
-        /// <summary>We opened difficulty select for these songs; bring the peer along.</summary>
+        /// <summary>We opened difficulty select for these songs; bring everyone along.</summary>
         public void SendOpenSetlist(IReadOnlyList<SongEntry> songs, bool show)
         {
             if (!IsConnected || State is not (SessionState.Lobby or SessionState.Waiting)) return;
 
-            _conn.Send(MsgType.OpenSetlist, w =>
+            Broadcast(MsgType.OpenSetlist, w =>
             {
                 w.Write(show);
                 w.Write(songs.Count);
@@ -861,24 +1353,24 @@ namespace YargNetplay.Net
             });
         }
 
-        /// <summary>We backed out of difficulty select to the library; take the peer back too.</summary>
+        /// <summary>We backed out of difficulty select to the library; take everyone back too.</summary>
         public void SendLeaveSetlist()
         {
             if (!IsConnected || State is not (SessionState.Lobby or SessionState.Waiting)) return;
             CancelReady();
-            _conn.Send(MsgType.LeaveSetlist);
+            Broadcast(MsgType.LeaveSetlist);
         }
 
-        private void OnPeerLeftSetlist()
+        private void OnPeerLeftSetlist(Peer peer)
         {
             CancelReady();
-            _peerReadyHash = null;
-            _peerReadySetup = null;
+            peer.ReadyHash = null;
+            peer.ReadySetup = null;
             if (NativeMenus.FollowOutOfDifficultySelect())
-                Notify.Info($"{PeerName} went back to the song list");
+                Notify.Info($"{peer.Name} went back to the song list");
         }
 
-        private void OnPeerOpenedSetlist(bool show, List<byte[]> hashes)
+        private void OnPeerOpenedSetlist(Peer peer, bool show, List<byte[]> hashes)
         {
             var songs = new List<SongEntry>();
             foreach (var hash in hashes)
@@ -889,20 +1381,21 @@ namespace YargNetplay.Net
                 }
                 else
                 {
-                    _transfer.Request(hash);
-                    Notify.Warning($"{PeerName} picked a song you don't have yet. Downloading it; try again when it finishes.");
+                    // Whoever opened it has every song in it.
+                    _transfer?.Request(hash, peer.Id);
+                    Notify.Warning($"{peer.Name} picked a song you don't have yet. Downloading it; try again when it finishes.");
                     return;
                 }
             }
 
-            NativeMenus.FollowIntoDifficultySelect(songs, show);
+            NativeMenus.FollowIntoDifficultySelect(songs, show, peer.Name);
         }
 
         // ---------------------------------------------------------------- ready gate
 
         /// <summary>
         /// Called (via a patch) whenever the game wants to load the gameplay scene.
-        /// Returns true when the load may proceed; otherwise we send Ready and wait for the peer.
+        /// Returns true when the load may proceed; otherwise we send Ready and wait for everyone else.
         /// </summary>
         public bool TryPassGameplayGate()
         {
@@ -917,7 +1410,7 @@ namespace YargNetplay.Net
 
             if (State is SessionState.Loading or SessionState.InSong)
             {
-                // Only a restart or skip announced to the peer may leave the song for another one.
+                // Only a restart or skip announced to the others may leave the song for another one.
                 if (!ChangingSong) return false;
                 State = SessionState.Lobby;
             }
@@ -940,33 +1433,34 @@ namespace YargNetplay.Net
                 && SceneManager.GetActiveScene().buildIndex == (int) SceneIndex.Score;
 
             _localReadyHash = song.Hash.HashBytes;
+            var hash = _localReadyHash;
             State = SessionState.Waiting;
-            _conn.Send(MsgType.Ready, w =>
+            Broadcast(MsgType.Ready, w =>
             {
-                w.WriteHash(_localReadyHash);
+                w.WriteHash(hash);
                 w.Write(setup.ProfileBytes.Length);
                 w.Write(setup.ProfileBytes);
                 w.Write(setup.EnginePresetJson);
             });
 
-            NetplayDialogs.ShowWaiting(PeerName, song.Name.Original, () => CancelReady());
+            NetplayDialogs.ShowWaiting(OthersText, song.Name.Original, () => CancelReady());
             CheckReady();
             return false;
         }
 
         /// <summary>
         /// Cancels our Ready. During a restart or skip the old song's scene is still up, so cancelling also leaves it
-        /// (for both players) unless <paramref name="leaveSong"/> is false because the song is being left anyway.
+        /// (for everyone) unless <paramref name="leaveSong"/> is false because the song is being left anyway.
         /// </summary>
         public void CancelReady(bool leaveSong = true)
         {
             if (State != SessionState.Waiting) return;
             if (ChangingSong && leaveSong && GameHooks.GameManager != null)
-                GameHooks.GameManager.ForceQuitSong(); // while ChangingSong is still set, so the peer is told
+                GameHooks.GameManager.ForceQuitSong(); // while ChangingSong is still set, so the others are told
             ChangingSong = false;
             _localReadyHash = null;
             State = SessionState.Lobby;
-            _conn?.Send(MsgType.Unready);
+            if (IsConnected) Broadcast(MsgType.Unready);
             NetplayDialogs.CloseWaiting();
 
             if (_undoShowAdvanceOnCancel && Show.Index > 0)
@@ -979,36 +1473,42 @@ namespace YargNetplay.Net
 
         private void CheckReady()
         {
-            if (State != SessionState.Waiting || _localReadyHash == null || _peerReadyHash == null) return;
+            if (State != SessionState.Waiting || _localReadyHash == null || Peers.Count == 0) return;
 
-            if (!_localReadyHash.AsSpan().SequenceEqual(_peerReadyHash))
+            foreach (var peer in Peers)
             {
-                string theirs = SongLibrary.TryGet(_peerReadyHash, out var s) ? s.Name.Original : "a different song";
+                if (peer.ReadyHash == null || _localReadyHash.AsSpan().SequenceEqual(peer.ReadyHash)) continue;
+
+                string theirs = SongLibrary.TryGet(peer.ReadyHash, out var s) ? s.Name.Original : "a different song";
                 NetplayDialogs.CloseWaiting();
-                NetplayDialogs.ShowError($"{PeerName} is ready for {theirs}. Pick the same song to play together.");
+                NetplayDialogs.ShowError($"{peer.Name} is ready for {theirs}. Pick the same song to play together.");
                 CancelReady();
-                _peerReadyHash = null;
-                _peerReadySetup = null;
+                peer.ReadyHash = null;
+                peer.ReadySetup = null;
                 return;
             }
+            if (Peers.Any(p => p.ReadyHash == null)) return;
 
             // A setlist has really started once its first song loads (not when difficulty select opens, which
             // can be backed out of). The next setlist is built from scratch, like in single player: the menu
             // scene's own setlist comes back empty too.
             if (Show.Playing && Show.Index == 0) Queue.Clear();
 
-            // Both ready for the same song: this setup drives the remote player for this song.
+            // Everyone ready for the same song: these setups drive the remote players for this song.
             _replacingSong = GameHooks.GameManager != null; // a restart or skip: the old scene unloads after this
             ChangingSong = false;
-            ActivePeerSetup = _peerReadySetup;
+            ActiveSetups = Peers.ToDictionary(p => p.Id, p => p.ReadySetup);
             ResetReady();
             LocalLoaded = false;
-            PeerLoaded = false;
+            foreach (var peer in Peers)
+            {
+                peer.Loaded = false;
+                peer.Inputs.Clear();
+            }
             StartAtHostTime = null;
-            RemoteInputs.Clear();
             ResetInputStream();
             State = SessionState.Loading;
-            Status = $"Playing with {PeerName}";
+            Status = $"Playing with {OthersText}";
 
             NetplayDialogs.CloseWaiting();
             _gateOpen = true;
@@ -1018,20 +1518,27 @@ namespace YargNetplay.Net
         private void ResetReady()
         {
             _localReadyHash = null;
-            _peerReadyHash = null;
-            _peerReadySetup = null;
+            foreach (var peer in Peers)
+            {
+                peer.ReadyHash = null;
+                peer.ReadySetup = null;
+            }
             _gateOpen = false;
             _undoShowAdvanceOnCancel = false;
         }
 
         // ---------------------------------------------------------------- in song
 
+        /// <summary>The players in the current song who are still connected.</summary>
+        public IEnumerable<Peer> SongPeers() =>
+            ActiveSetups == null ? Enumerable.Empty<Peer>() : Peers.Where(p => ActiveSetups.ContainsKey(p.Id));
+
         /// <summary>Called by the start-gate patch once our gameplay scene has finished loading.</summary>
         public void MarkLocalLoaded()
         {
             if (LocalLoaded) return;
             LocalLoaded = true;
-            _conn?.Send(MsgType.Loaded);
+            if (!IsHost) SendTo(Protocol.HostId, MsgType.Loaded);
         }
 
         /// <summary>True once the agreed start time has passed. Gates GameManager.Update.</summary>
@@ -1050,12 +1557,12 @@ namespace YargNetplay.Net
             _recentInputs.Add((seq, i));
             if (_recentInputs.Count > UDP_REPEATED_INPUTS) _recentInputs.RemoveAt(0);
             _inputsSinceStream = true;
-            _conn.Send(MsgType.Input, w => { w.Write(seq); w.Write(i.Time); w.Write(i.Action); w.Write(i.Integer); });
+            Broadcast(MsgType.Input, w => { w.Write(seq); w.Write(i.Time); w.Write(i.Action); w.Write(i.Integer); });
         }
 
         /// <summary>
         /// Called every frame of a song with our engine's time, after it has taken this frame's inputs. Sends the
-        /// watermark over TCP, and over UDP together with the latest inputs (again), so the peer gets them even when a
+        /// watermark over TCP, and over UDP together with the latest inputs (again), so the others get them even when a
         /// TCP packet is held up.
         /// </summary>
         public void SendInputStream(double engineTime)
@@ -1069,14 +1576,16 @@ namespace YargNetplay.Net
 
             int lastSeq = _sendSeq - 1;
             double mark = _lastMarkSent;
-            _conn.Send(MsgType.Watermark, w => { w.Write(lastSeq); w.Write(mark); });
+            Broadcast(MsgType.Watermark, w => { w.Write(lastSeq); w.Write(mark); });
 
             if (_udp == null) return;
             // Only the newest inputs, and none from long ago: all repeated inputs must be numbered in a row up to lastSeq.
             int first = _recentInputs.Count;
             while (first > 0 && _recentInputs[first - 1].input.Time >= mark - UDP_REPEAT_WINDOW) first--;
-            _udp.Send(UdpChannel.KindInputs, w =>
+            byte me = LocalId;
+            _udp.SendAll(UdpChannel.KindInputs, w =>
             {
+                w.Write(me);
                 w.Write(songKey);
                 w.Write(lastSeq);
                 w.Write(mark);
@@ -1100,33 +1609,40 @@ namespace YargNetplay.Net
             _inputsSinceStream = false;
         }
 
-        public void SendPause(bool paused) => _conn?.Send(paused ? MsgType.Pause : MsgType.Resume);
+        public void SendPause(bool paused)
+        {
+            if (IsConnected) Broadcast(paused ? MsgType.Pause : MsgType.Resume);
+        }
 
-        public void SendLeaveSong() => _conn?.Send(MsgType.LeaveSong);
+        public void SendLeaveSong()
+        {
+            if (IsConnected) Broadcast(MsgType.LeaveSong);
+        }
 
         /// <summary>
         /// We restarted the song or skipped to <paramref name="song"/> (setlist position <paramref name="showIndex"/>)
-        /// from the pause menu. YARG then reloads the scene, which waits at the ready gate for the peer to follow.
+        /// from the pause menu. YARG then reloads the scene, which waits at the ready gate for the others to follow.
         /// </summary>
         public void BeginSongChange(SongEntry song, int showIndex, bool skip)
         {
             if (!IsConnected || ChangingSong || State is not (SessionState.Loading or SessionState.InSong)) return;
             ChangingSong = true;
-            _conn.Send(MsgType.ChangeSong, w =>
+            var hash = song.Hash.HashBytes;
+            Broadcast(MsgType.ChangeSong, w =>
             {
                 w.Write(showIndex);
-                w.WriteHash(song.Hash.HashBytes);
+                w.WriteHash(hash);
                 w.Write(skip);
             });
         }
 
-        private void OnPeerChangedSong(int showIndex, byte[] hash, bool skip)
+        private void OnPeerChangedSong(Peer peer, int showIndex, byte[] hash, bool skip)
         {
-            // Both pressed at once: each is already waiting at the gate, which settles whether it's the same song.
+            // Several pressed at once: each is already waiting at the gate, which settles whether it's the same song.
             if (ChangingSong || GameHooks.GameManager == null || State is not (SessionState.Loading or SessionState.InSong)) return;
             if (!SongLibrary.TryGet(hash, out var song))
             {
-                Notify.Warning($"{PeerName} skipped to a song you don't have.");
+                Notify.Warning($"{peer.Name} skipped to a song you don't have.");
                 return;
             }
 
@@ -1135,14 +1651,14 @@ namespace YargNetplay.Net
             GlobalVariables.State.CurrentSong = song;
             ChangingSong = true;
 
-            Notify.Info(skip ? $"{PeerName} skipped to {song.Name.Original}" : $"{PeerName} restarted the song");
+            Notify.Info(skip ? $"{peer.Name} skipped to {song.Name.Original}" : $"{peer.Name} restarted the song");
             NetplayDialogs.CloseLeaveConfirm();
             GlobalVariables.Instance.LoadScene(SceneIndex.Gameplay); // held at the ready gate like our own restart
         }
 
         /// <summary>
         /// Called when the gameplay scene is unloaded. Only clears the song that was played: a Ready for
-        /// the next setlist song may already have arrived from the peer and must survive.
+        /// the next setlist song may already have arrived from the others and must survive.
         /// </summary>
         public void EndSong()
         {
@@ -1153,16 +1669,20 @@ namespace YargNetplay.Net
                 return;
             }
 
-            ActivePeerSetup = null;
+            ActiveSetups = null;
             LocalLoaded = false;
-            PeerLoaded = false;
+            foreach (var peer in Peers)
+            {
+                peer.Loaded = false;
+                peer.Inputs.Clear();
+            }
             StartAtHostTime = null;
-            RemoteInputs.Clear();
             ResetInputStream();
             if (State is SessionState.Loading or SessionState.InSong)
             {
-                State = IsConnected ? SessionState.Lobby : SessionState.Idle;
-                if (IsConnected) Status = $"Connected to {PeerName}";
+                State = IsConnected ? SessionState.Lobby : IsHost && _listener != null ? SessionState.Hosting : SessionState.Idle;
+                if (IsHost) UpdateHostStatus();
+                else if (IsConnected) Status = $"Connected to {NameOf(Protocol.HostId)}";
             }
         }
     }

@@ -33,7 +33,7 @@ namespace YargNetplay
             Port = Config.Bind("Network", "Port", Protocol.DefaultPort, "TCP port used when hosting.");
             LastJoinAddress = Config.Bind("Network", "LastJoinAddress", "", "Address last used to join (prefilled in the Join dialog).");
             RemoteDelayMs = Config.Bind("Gameplay", "RemoteDelayMs", 200,
-                "How far behind the song the other player's highway runs, in ms, when AutoDelay is off. " +
+                "How far behind the song the other players' highways run, in ms, when AutoDelay is off. " +
                 "Too short for the connection and their highway pauses now and then to wait for their inputs.");
             AutoDelay = Config.Bind("Gameplay", "AutoDelay", true,
                 "Start each song with a remote player delay picked from the measured ping, then follow the lag measured during the song.");
@@ -44,7 +44,7 @@ namespace YargNetplay
                 "Whether the shared setlist overlay in the music library is collapsed to its header.");
             PreferredInstrument = Config.Bind("Gameplay", "PreferredInstrument", "Any",
                 "Instrument you plan to play online (YARG Instrument name, or Any). The music library only shows " +
-                "songs that have charts for both players' parts.");
+                "songs that have charts for every player's part.");
             PreferredDifficulty = Config.Bind("Gameplay", "PreferredDifficulty", "Expert",
                 "Difficulty for PreferredInstrument (Easy, Medium, Hard or Expert).");
             CheckForUpdates = Config.Bind("Updates", "CheckForUpdates", true,

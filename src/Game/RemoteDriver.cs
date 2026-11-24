@@ -8,11 +8,11 @@ using YargNetplay.Net;
 namespace YargNetplay.Game
 {
     /// <summary>
-    /// Replaces BasePlayer.GameplayUpdate for the remote player. The remote player runs a delay behind the shared song
-    /// clock, so its inputs have normally arrived by the time the engine reaches them, and the engine reproduces the
-    /// peer's exact result.
+    /// Replaces BasePlayer.GameplayUpdate for one remote player (there is one driver per other player in the song). The
+    /// remote player runs a delay behind the shared song clock, so its inputs have normally arrived by the time the
+    /// engine reaches them, and the engine reproduces that player's exact result.
     ///
-    /// It also never runs past the peer's watermark (<see cref="RemoteInputBuffer.Watermark"/>): the time up to which
+    /// It also never runs past their watermark (<see cref="RemoteInputBuffer.Watermark"/>): the time up to which
     /// every input of theirs has arrived. When a lag spike holds their packets up, the remote highway pauses instead of
     /// judging notes without the inputs, then catches up. So a delay that's too short only costs a short pause, never
     /// a wrong result.
@@ -21,7 +21,7 @@ namespace YargNetplay.Game
     /// <see cref="LagWindow"/> seconds, plus a margin), so the highway rarely has to pause. Changes are eased in by
     /// running the remote player slightly slower or faster than the song.
     /// </summary>
-    internal static class RemoteDriver
+    internal sealed class RemoteDriver
     {
         private const double MinDelay = 0.030, MaxDelay = 1.0;
         private const double DelayMargin = 0.020;
@@ -33,64 +33,60 @@ namespace YargNetplay.Game
         // Further ahead than this (the song clock jumped back), it just waits for the song to catch up.
         private const double HoldWhenAhead = 0.25;
 
-        private static bool _active, _adaptive;
-        private static double _startDelay, _targetDelay;
-        private static double _engineTime, _lastSongTime, _firstLagTime;
-        private static readonly List<(double start, double lag)> LagBuckets = new();
+        /// <summary>The player whose inputs drive this remote player.</summary>
+        public Peer Peer { get; }
 
-        private static int _shiftedPlayer;
-        private static float _appliedShift;
+        private readonly bool _adaptive;
+        private readonly double _startDelay;
+        private double _targetDelay;
+        private double _engineTime, _lastSongTime, _firstLagTime;
+        private readonly List<(double start, double lag)> _lagBuckets = new();
 
-        private static int _inputs, _lateInputs, _stalls;
-        private static double _worstLateness, _stallTime, _highestDelay;
-        private static bool _stalled;
+        private int _shiftedPlayer;
+        private float _appliedShift;
 
-        /// <summary>How far behind the song the remote player is right now (for the debug window).</summary>
-        public static double CurrentDelay { get; private set; }
+        private int _inputs, _lateInputs, _stalls;
+        private double _worstLateness, _stallTime, _highestDelay;
+        private bool _stalled;
 
-        public static void BeginSong(double delay)
+        /// <summary>How far behind the song this remote player is right now (for the debug window).</summary>
+        public double CurrentDelay { get; private set; }
+
+        public RemoteDriver(Peer peer, double delay)
         {
+            Peer = peer;
             _startDelay = _targetDelay = CurrentDelay = _highestDelay = delay;
             _adaptive = Plugin.AutoDelay.Value;
             _engineTime = _lastSongTime = _firstLagTime = double.NegativeInfinity;
-            LagBuckets.Clear();
-            _shiftedPlayer = 0;
-            _appliedShift = 0;
-            _inputs = _lateInputs = _stalls = 0;
-            _worstLateness = _stallTime = 0;
-            _stalled = false;
-            _active = true;
-            Plugin.Log.LogInfo($"Remote player delay for this song: starts at {delay * 1000:0} ms{(_adaptive ? ", adjusts to the measured lag" : "")}");
+            Plugin.Log.LogInfo($"{peer.Name}'s delay for this song: starts at {delay * 1000:0} ms{(_adaptive ? ", adjusts to the measured lag" : "")}");
         }
 
         /// <summary>
         /// Called when the gameplay scene ends. Late inputs (arriving after the engine passed their time) shouldn't
         /// happen any more, since the engine waits for the watermark; a non-zero count points at a bug.
         /// </summary>
-        public static void EndSong(string peerName)
+        public void EndSong()
         {
-            if (!_active) return;
-            _active = false;
-
-            Plugin.Log.LogInfo($"Remote inputs: {_inputs} received, {_lateInputs} late (worst {_worstLateness * 1000:0} ms). " +
+            string name = Peer.Name;
+            Plugin.Log.LogInfo($"{name}'s inputs: {_inputs} received, {_lateInputs} late (worst {_worstLateness * 1000:0} ms). " +
                 $"Delay started at {_startDelay * 1000:0} ms, ended at {_targetDelay * 1000:0} ms, highest {_highestDelay * 1000:0} ms. " +
-                $"Waited for {peerName}'s inputs {_stalls} time(s), {_stallTime:0.00} s in all.");
+                $"Waited for {name}'s inputs {_stalls} time(s), {_stallTime:0.00} s in all.");
             if (_lateInputs > 0)
-                UI.Notify.Warning($"{_lateInputs} of {peerName}'s inputs arrived late (up to {_worstLateness * 1000:0} ms).");
+                UI.Notify.Warning($"{_lateInputs} of {name}'s inputs arrived late (up to {_worstLateness * 1000:0} ms).");
         }
 
-        public static void Update(BasePlayer player, GameManager gm, Session session)
+        public void Update(BasePlayer player, GameManager gm)
         {
             if (!gm.Started || gm.Paused) return;
 
             if (!gm.Rewinding)
             {
-                // The time the remote engine would be at with no delay (the peer's calibration is part of their input times).
+                // The time the remote engine would be at with no delay (the other player's calibration is part of their input times).
                 double songTime = gm.InputTime + player.InputCalibration;
                 double dt = double.IsNegativeInfinity(_lastSongTime) ? 0 : Math.Max(0, songTime - _lastSongTime);
                 _lastSongTime = songTime;
 
-                var inputs = session.RemoteInputs;
+                var inputs = Peer.Inputs;
                 double mark = inputs.Watermark;
                 if (!double.IsNegativeInfinity(mark)) MeasureLag(songTime, songTime - mark);
 
@@ -126,7 +122,7 @@ namespace YargNetplay.Game
             Accessors.UpdateVisuals(player, gm.VisualTime - CurrentDelay);
         }
 
-        private static void Advance(BasePlayer player, RemoteInputBuffer inputs, double time)
+        private void Advance(BasePlayer player, RemoteInputBuffer inputs, double time)
         {
             var engine = player.BaseEngine;
             var log = Accessors.ReplayInputs(player);
@@ -149,24 +145,24 @@ namespace YargNetplay.Game
         }
 
         /// <summary>
-        /// Records how far the peer's watermark is behind the song (the delay that would have been needed right now),
+        /// Records how far the player's watermark is behind the song (the delay that would have been needed right now),
         /// and with Auto delay on sets the delay from the worst of the last <see cref="LagWindow"/> seconds.
         /// </summary>
-        private static void MeasureLag(double songTime, double lag)
+        private void MeasureLag(double songTime, double lag)
         {
             if (double.IsNegativeInfinity(_firstLagTime)) _firstLagTime = songTime;
 
-            int last = LagBuckets.Count - 1;
-            if (last >= 0 && songTime - LagBuckets[last].start < LagBucket)
-                LagBuckets[last] = (LagBuckets[last].start, Math.Max(LagBuckets[last].lag, lag));
+            int last = _lagBuckets.Count - 1;
+            if (last >= 0 && songTime - _lagBuckets[last].start < LagBucket)
+                _lagBuckets[last] = (_lagBuckets[last].start, Math.Max(_lagBuckets[last].lag, lag));
             else
-                LagBuckets.Add((songTime, lag));
-            while (LagBuckets.Count > 1 && LagBuckets[0].start < songTime - LagWindow) LagBuckets.RemoveAt(0);
+                _lagBuckets.Add((songTime, lag));
+            while (_lagBuckets.Count > 1 && _lagBuckets[0].start < songTime - LagWindow) _lagBuckets.RemoveAt(0);
 
             if (!_adaptive) return;
 
             double worst = double.NegativeInfinity;
-            foreach (var bucket in LagBuckets) worst = Math.Max(worst, bucket.lag);
+            foreach (var bucket in _lagBuckets) worst = Math.Max(worst, bucket.lag);
             double delay = worst + DelayMargin;
             if (songTime - _firstLagTime < SettleTime) delay = Math.Max(delay, _startDelay);
             _targetDelay = Math.Max(MinDelay, Math.Min(MaxDelay, delay));
@@ -179,7 +175,7 @@ namespace YargNetplay.Game
         /// so notes reach the strike line exactly when the delayed engine judges them. The delay changes during the
         /// song, so the shift follows it every frame.
         /// </summary>
-        private static void ShiftVisuals(BasePlayer player, double delay)
+        private void ShiftVisuals(BasePlayer player, double delay)
         {
             if (player is not TrackPlayer) return;
             if (_shiftedPlayer != player.GetInstanceID())

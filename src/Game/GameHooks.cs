@@ -18,27 +18,36 @@ namespace YargNetplay.Game
     internal static class GameHooks
     {
         public static GameManager GameManager { get; private set; }
-        public static YargPlayer RemotePlayer { get; private set; }
         public static YargPlayer LocalPlayer { get; private set; }
+
+        /// <summary>The other players' players in the current song, each with the driver that feeds it their inputs.</summary>
+        public static readonly Dictionary<YargPlayer, RemoteDriver> Remotes = new();
 
         private static bool _applyingRemotePause;
         private static bool _applyingRemoteLeave;
 
-        /// <summary>The session while a netplay song's scene is up, including while a restart or skip waits for the peer.</summary>
+        /// <summary>The session while a netplay song's scene is up, including while a restart or skip waits for the others.</summary>
         public static Session ActiveSession =>
-            Session.Current is { ActivePeerSetup: not null } s && (s.InSongFlow || s.ChangingSong) ? s : null;
+            Session.Current is { ActiveSetups: not null } s && (s.InSongFlow || s.ChangingSong) ? s : null;
 
-        public static bool IsRemote(YargPlayer player) => player != null && player == RemotePlayer;
+        public static bool IsRemote(YargPlayer player) => player != null && Remotes.ContainsKey(player);
 
-        /// <summary>The peer's player from the last song. Unlike RemotePlayer it outlives the gameplay scene, for the score screen.</summary>
-        private static YargPlayer _lastRemotePlayer;
+        /// <summary>The other players' players from the last song. Unlike Remotes they outlive the gameplay scene, for the score screen.</summary>
+        private static readonly HashSet<YargPlayer> LastRemotePlayers = new();
 
         public static void Clear()
         {
             GameManager = null;
-            RemotePlayer = null;
+            Remotes.Clear();
             LocalPlayer = null;
             _startAligned = false;
+        }
+
+        /// <summary>The gameplay scene ended: log how each remote player went, then forget the scene.</summary>
+        public static void EndSong()
+        {
+            foreach (var driver in Remotes.Values) driver.EndSong();
+            Clear();
         }
 
         public static void ApplyRemotePause(bool paused)
@@ -107,34 +116,50 @@ namespace YargNetplay.Game
 
         // ------------------------------------------------------------ player injection
 
-        /// <summary>Add the remote player to the player list right after GameManager reads PlayerContainer.</summary>
+        /// <summary>Add the other players to the player list right after GameManager reads PlayerContainer.</summary>
         [HarmonyPatch(typeof(GameManager), "Awake")]
         private static class GameManagerAwakePatch
         {
             private static void Postfix(GameManager __instance)
             {
                 Clear();
+                LastRemotePlayers.Clear();
                 var session = ActiveSession;
                 if (session == null || __instance.Song == null) return;
 
+                GameManager = __instance;
+                LocalPlayer = __instance.YargPlayers.FirstOrDefault(p => !p.SittingOut && !p.IsReplay);
+                var players = new List<YargPlayer>(__instance.YargPlayers);
+
+                // In player id order, so every game lists the others the same way.
+                foreach (var peer in session.SongPeers().OrderBy(p => p.Id))
+                {
+                    try
+                    {
+                        var player = SongLauncher.CreateRemotePlayer(session.ActiveSetups[peer.Id]);
+                        Remotes[player] = new RemoteDriver(peer, session.RemoteDelaySeconds(peer));
+                        LastRemotePlayers.Add(player);
+                        players.Add(player);
+                        Plugin.Log.LogInfo($"Injected remote player {player.Profile.Name} ({player.Profile.CurrentInstrument})");
+                    }
+                    catch (Exception e)
+                    {
+                        // Never leave YARG with a half-built gameplay scene: log it and play this song without that player.
+                        Plugin.Log.LogError($"Couldn't add {peer.Name}'s player to this song: {e}");
+                        UI.Notify.Error($"Couldn't add {peer.Name}'s player to this song. See the BepInEx log.");
+                    }
+                }
+
                 try
                 {
-                    GameManager = __instance;
-                    LocalPlayer = __instance.YargPlayers.FirstOrDefault(p => !p.SittingOut && !p.IsReplay);
-                    RemotePlayer = _lastRemotePlayer = SongLauncher.CreateRemotePlayer(session.ActivePeerSetup);
-                    RemoteDriver.BeginSong(session.RemoteDelaySeconds);
-
-                    var players = new List<YargPlayer>(__instance.YargPlayers) { RemotePlayer };
                     Accessors.SetYargPlayers(__instance, players.ToArray());
-
-                    Plugin.Log.LogInfo($"Injected remote player {RemotePlayer.Profile.Name} ({RemotePlayer.Profile.CurrentInstrument})");
                 }
                 catch (Exception e)
                 {
-                    // Never leave YARG with a half-built gameplay scene: log it and play this song without the peer.
-                    Plugin.Log.LogError($"Couldn't add {session.PeerName}'s player to this song: {e}");
-                    UI.Notify.Error($"Couldn't add {session.PeerName}'s player to this song. See the BepInEx log.");
+                    Plugin.Log.LogError($"Couldn't add the other players to this song: {e}");
+                    UI.Notify.Error("Couldn't add the other players to this song. See the BepInEx log.");
                     Clear();
+                    LastRemotePlayers.Clear();
                 }
             }
         }
@@ -237,10 +262,10 @@ namespace YargNetplay.Game
         {
             private static bool Prefix(BasePlayer __instance)
             {
-                var session = ActiveSession;
-                if (session == null || !IsRemote(__instance.Player)) return true;
+                if (ActiveSession == null || __instance.Player == null || !Remotes.TryGetValue(__instance.Player, out var driver))
+                    return true;
 
-                RemoteDriver.Update(__instance, GameManager, session);
+                driver.Update(__instance, GameManager);
                 return false;
             }
 
@@ -314,7 +339,7 @@ namespace YargNetplay.Game
                 var session = ActiveSession;
                 if (session == null || GameManager == null) return true;
 
-                UI.NetplayDialogs.ConfirmLeaveSong(session.PeerName, () =>
+                UI.NetplayDialogs.ConfirmLeaveSong(session.OthersText, () =>
                 {
                     if (GameManager != null) GameManager.ForceQuitSong();
                 });
@@ -383,7 +408,7 @@ namespace YargNetplay.Game
             private static void Prefix(UnityEngine.MonoBehaviour __instance, out YargPlayer __state)
             {
                 var player = Traverse.Create(__instance).Property("Player").GetValue<YargPlayer>();
-                __state = player != null && player == _lastRemotePlayer ? player : null;
+                __state = player != null && LastRemotePlayers.Contains(player) ? player : null;
                 if (__state == null) return;
 
                 // Older builds read the player's IsReplay; newer ones copy it into the card's own IsReplay field.
