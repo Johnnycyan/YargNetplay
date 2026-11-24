@@ -41,12 +41,13 @@ namespace YargNetplay.UI
             RenameInput(dialog).text = prefill ?? "";
         }
 
-        public static void ShowWaiting(string peer, string song, Action onCancel)
+        /// <param name="others">The other players' names as one phrase ("Alice and Bob").</param>
+        public static void ShowWaiting(string others, string song, Action onCancel)
         {
             if (Dialogs == null) return;
             ClearCurrent();
 
-            var dialog = Dialogs.ShowMessage("Online", $"Waiting for {peer} to be ready for {song}...");
+            var dialog = Dialogs.ShowMessage("Online", $"Waiting for {others} to be ready for {song}...");
             dialog.ClearButtons();
             dialog.AddDialogButton("Menu.Common.Cancel", MenuData.Colors.CancelButton, () => onCancel());
             _waiting = dialog;
@@ -61,8 +62,8 @@ namespace YargNetplay.UI
 
         private static Dialog _leaveConfirm;
 
-        /// <summary>Asks before leaving a song online, since leaving sends the other player back to the library too.</summary>
-        public static void ConfirmLeaveSong(string peer, Action onLeave)
+        /// <summary>Asks before leaving a song online, since leaving sends the other players back to the library too.</summary>
+        public static void ConfirmLeaveSong(string others, Action onLeave)
         {
             if (Dialogs == null)
             {
@@ -72,7 +73,7 @@ namespace YargNetplay.UI
             ClearCurrent();
 
             _nextDialogIsLeaveConfirm = true;
-            var dialog = Dialogs.ShowMessage("Leave Song?", $"Going back to the library ends the song for {peer} too.");
+            var dialog = Dialogs.ShowMessage("Leave Song?", $"Going back to the library ends the song for {others} too.");
             _nextDialogIsLeaveConfirm = false;
             dialog.ClearButtons();
             StackButtonsVertically(dialog);

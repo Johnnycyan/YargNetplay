@@ -1,6 +1,6 @@
 # YARG Netplay
 
-BepInEx 5 + HarmonyX plugin (net472) that adds online 2-player sessions to YARG without modifying the game. README.md describes the features and how each one works; read it before changing behavior.
+BepInEx 5 + HarmonyX plugin (net472) that adds online multiplayer sessions (up to 8 players, host-relayed star) to YARG without modifying the game. README.md describes the features and how each one works; read it before changing behavior.
 
 ## Build
 

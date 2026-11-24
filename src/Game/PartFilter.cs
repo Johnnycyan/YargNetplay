@@ -73,7 +73,7 @@ namespace YargNetplay.Game
     }
 
     /// <summary>
-    /// While connected, the music library only lists songs that have a chart for both players' preferred parts.
+    /// While connected, the music library only lists songs that have a chart for every player's preferred part.
     /// Hooks YARG's own filter predicate (FiltersMenu), so it combines with YARG's filters and gets the
     /// filtered song counts and selection handling for free.
     /// </summary>
@@ -81,7 +81,7 @@ namespace YargNetplay.Game
     {
         private static PartChoice? _localPart;
 
-        /// <summary>The local player's preferred part (saved in the config, shared with the peer while connected).</summary>
+        /// <summary>The local player's preferred part (saved in the config, shared with the others while connected).</summary>
         public static PartChoice LocalPart => _localPart ??= PartChoice.FromConfig();
 
         public static void SetLocalPart(PartChoice part)
@@ -94,19 +94,23 @@ namespace YargNetplay.Game
             Refresh();
         }
 
-        private static bool Active(out PartChoice local, out PartChoice peer)
+        /// <summary>Every player's part (ours first) while connected and at least one of them isn't "any part".</summary>
+        private static bool Active(out PartChoice[] parts)
         {
-            local = peer = default;
+            parts = null;
             if (Session.Current is not { IsConnected: true } session) return false;
-            local = LocalPart;
-            peer = session.PeerPart;
-            return !(local.IsAny && peer.IsAny);
+            parts = new[] { LocalPart }.Concat(session.Peers.Select(p => p.Part)).ToArray();
+            return parts.Any(p => !p.IsAny);
         }
 
-        public static bool Allows(SongEntry song) =>
-            !Active(out var local, out var peer) || (local.Allows(song) && peer.Allows(song));
+        private static bool AllowsAll(PartChoice[] parts, SongEntry song)
+        {
+            foreach (var part in parts)
+                if (!part.Allows(song)) return false;
+            return true;
+        }
 
-        /// <summary>Re-applies the filter after either player's part (or the connection) changed.</summary>
+        /// <summary>Re-applies the filter after any player's part (or who is connected) changed.</summary>
         public static void Refresh()
         {
             try { FiltersMenu.RefreshActiveFilterPredicate(); }
@@ -121,9 +125,10 @@ namespace YargNetplay.Game
         {
             private static void Postfix(ref Func<SongEntry, bool> __result)
             {
-                if (!Active(out _, out _)) return;
+                // The parts are taken once here: Refresh rebuilds the predicate whenever any of them changes.
+                if (!Active(out var parts)) return;
                 var yarg = __result;
-                __result = yarg == null ? Allows : song => yarg(song) && Allows(song);
+                __result = yarg == null ? song => AllowsAll(parts, song) : song => yarg(song) && AllowsAll(parts, song);
             }
         }
 

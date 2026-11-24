@@ -86,22 +86,29 @@ namespace YargNetplay.UI
             GUILayout.BeginHorizontal();
             GUILayout.Label(session.Status);
             GUILayout.FlexibleSpace();
-            if (session.IsConnected)
-            {
-                GUILayout.Label($"Ping {session.RttSeconds * 1000:0} ms", GUILayout.Width(90));
-                GUILayout.Label(session.UdpWorking ? "UDP ok" : "TCP only", GUILayout.Width(70));
-                if (session.InSongFlow)
-                    GUILayout.Label($"Now {Game.RemoteDriver.CurrentDelay * 1000:0} ms behind", GUILayout.Width(130));
-            }
             if (GUILayout.Button(session.IsConnected ? "Disconnect" : "Cancel", GUILayout.Width(90)))
                 session.Dispose();
             GUILayout.EndHorizontal();
+
+            // One line per other player: ping, UDP, and during a song how far behind their highway runs.
+            foreach (var peer in session.Peers)
+            {
+                var driver = Game.GameHooks.Remotes.Values.FirstOrDefault(d => d.Peer == peer);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(peer.Name, GUILayout.Width(160));
+                GUILayout.Label($"Ping {session.PingTo(peer) * 1000:0} ms", GUILayout.Width(90));
+                GUILayout.Label(session.UdpFailed(peer) ? "TCP only" : "UDP ok", GUILayout.Width(70));
+                if (driver != null)
+                    GUILayout.Label($"Now {driver.CurrentDelay * 1000:0} ms behind", GUILayout.Width(130));
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+            }
 
             if (session.IsConnected)
             {
                 GUI.enabled = !session.InSongFlow;
                 GUILayout.BeginHorizontal();
-                GUILayout.Label($"Remote player delay: {session.RemoteDelaySeconds * 1000:0} ms", GUILayout.Width(210));
+                GUILayout.Label($"Remote player delay: {session.MaxRemoteDelaySeconds * 1000:0} ms", GUILayout.Width(210));
                 Plugin.AutoDelay.Value = GUILayout.Toggle(Plugin.AutoDelay.Value, "Auto", GUILayout.Width(60));
                 if (!Plugin.AutoDelay.Value)
                     Plugin.RemoteDelayMs.Value = (int) Math.Round(GUILayout.HorizontalSlider(Plugin.RemoteDelayMs.Value, 30f, 500f) / 10) * 10;
@@ -167,7 +174,7 @@ namespace YargNetplay.UI
                 GUILayout.BeginHorizontal();
 
                 var transfer = session.Transfer?.GetStatus(item.Hash);
-                var (state, color) = QueueStatus.Describe(item, transfer, session.PeerName);
+                var (state, color) = QueueStatus.Describe(item, transfer, session);
                 GUILayout.Label($"<color={color}>{state}</color>", RichLabel, GUILayout.Width(160));
                 GUILayout.Label($"{item.Name} - {item.Artist}");
 

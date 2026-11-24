@@ -27,6 +27,10 @@ namespace YargNetplay.UI
                     sb.AppendLine($"===== prefab {name}");
                     if (prefab != null) Dump(prefab.transform, 0, sb, 12);
                 }
+                // The sidebar the Online page is built from, whole (the menu dump above stops before its rows).
+                var sidebar = profileList.transform.Find(ProfilesTemplate.Sidebar);
+                sb.AppendLine("===== Profiles sidebar");
+                if (sidebar != null) Dump(sidebar, 0, sb, 12);
                 var row = profileList.transform.Find(ProfilesTemplate.Sidebar + "/ScrollView/Viewport/Content/Input Calibration");
                 sb.AppendLine("===== Input Calibration row");
                 if (row != null) Dump(row, 0, sb, 12);

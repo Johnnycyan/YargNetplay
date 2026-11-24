@@ -44,8 +44,7 @@ namespace YargNetplay
         private static void OnSceneUnloaded(Scene scene)
         {
             if (scene.buildIndex != (int) SceneIndex.Gameplay) return;
-            GameHooks.Clear();
-            RemoteDriver.EndSong(Session.Current?.PeerName ?? "your partner");
+            GameHooks.EndSong();
             Session.Current?.EndSong();
         }
 

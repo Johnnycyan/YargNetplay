@@ -211,15 +211,15 @@ namespace YargNetplay.UI
             if (queue.Count == 0)
             {
                 _rows[0].Show(false, false, false);
-                _rows[0].Text.text = "<color=#9fb3c8><size=85%>Hold Green on a song to add it to the setlist for both players.</size></color>";
+                _rows[0].Text.text = "<color=#9fb3c8><size=85%>Hold Green on a song to add it to the setlist for everyone.</size></color>";
             }
             else
             {
                 for (int i = 0; i < queue.Count; i++)
                 {
                     var item = queue[i];
-                    var (state, color) = QueueStatus.Describe(item, session.Transfer?.GetStatus(item.Hash), session.PeerName);
-                    string by = item.AddedByMe ? "you" : session.PeerName;
+                    var (state, color) = QueueStatus.Describe(item, session.Transfer?.GetStatus(item.Hash), session);
+                    string by = item.AddedByMe ? "you" : item.AddedBy;
                     _rows[i].Show(Editing, Editing && i == _selected, Editing && i == _selected && _grabbed);
                     _rows[i].Text.text =
                         $"<b>{i + 1}. <noparse>{item.Name}</noparse></b>\n" +
