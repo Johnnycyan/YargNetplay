@@ -118,15 +118,21 @@ The rest of this page is for the curious and for anyone working on the mod. **F8
 
 Every private member the mod touches is listed in `src/Game/Accessors.cs` and the patch targets in `src/Game/GameHooks.cs`. Check those first when a YARG update breaks the mod.
 
+## YARG MIDI Fix (installed alongside)
+
+A second, small plugin (`midifix/`, installed to `BepInEx\plugins\YargMidiFix\`) that makes YARG run faster whether or not you play online. Minis, YARG's MIDI input library, asks for the MIDI port count on every input update to notice devices being plugged in. On Windows 11 that call walks the device list and registry each time; in a profile it took about a third of the main thread's time, and removing it nearly doubled the frame rate. The plugin checks the count on a background thread once a second instead, and Minis only runs its own check when the count changed. A newly plugged-in MIDI device can take up to a second to show up. MIDI notes themselves are read on Minis' own threads as before.
+
+It only touches Minis by reflection (`Minis.MidiBackend.OnUpdate` and `_lastPortCount`), so one DLL works on both YARG channels; if Minis changes, it logs a warning and does nothing. It has the same version as the mod and is released, installed and updated with it.
+
 ## Installer and updates
 
-The installer downloads the newest YARG Netplay release from GitHub, built for the YARG channel of each install (stable or nightly). It finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\`. Run it again to update the mod. To install a local build instead, pass `-PluginPath <dll>` (Windows) or set `YARGNETPLAY_DLL=<dll>` (Linux and macOS).
+The installer downloads the newest YARG Netplay release from GitHub, built for the YARG channel of each install (stable or nightly). It finds the YARG versions installed by the YARC Launcher (it asks which one if there are several, or pass the YARG folder as an argument), downloads BepInEx 5.4.23.6 if it isn't installed yet (checked against its published SHA-256), and copies the plugin into `BepInEx\plugins\YargNetplay\` and the [MIDI fix](#yarg-midi-fix-installed-alongside) into `BepInEx\plugins\YargMidiFix\`. Run it again to update the mod. To install a local build instead, pass `-PluginPath <dll>` (Windows) or set `YARGNETPLAY_DLL=<dll>` (Linux and macOS); a `YargMidiFix.dll` in the same folder is installed too.
 
 - **Native Linux YARG:** BepInEx starts through `run_bepinex.sh`, so the installer adds a "YARG (Netplay)" app shortcut. The YARC Launcher's Play button starts YARG without the mod.
 - **macOS:** the installer finds YARC Launcher installs under `~/Library/Application Support/YARC`, installs BepInEx's universal macOS build next to `YARG.app`, and adds a "YARG (Netplay)" app to `~/Applications` that starts YARG through `run_bepinex.sh` (Apple Silicon runs natively). The YARC Launcher's Play button starts YARG without the mod. Not tested on a Mac yet.
 - **YARG.exe under Wine or Proton:** the Windows BepInEx is installed. Start YARG with `WINEDLLOVERRIDES="winhttp=n,b"`.
 
-Once the main menu has finished loading, the mod checks GitHub for a newer release and shows a dialog if there is one (turn it off with `CheckForUpdates` in the `[Updates]` section of the config). **Update Now** downloads the release DLL for your YARG channel (Stable or Nightly, baked into each build) and swaps it in for the installed plugin; the new version is used after restarting YARG (the dialog offers **Quit YARG**). The running DLL can't be overwritten on Windows, but it can be renamed, so it's moved aside to `YargNetplay.dll.old` and deleted on the next launch (Linux and macOS take the same path). The same DLL runs on every OS, so the update works wherever the installer does. The download is checked (a valid assembly named YargNetplay with the release's version) before it replaces anything. If the update fails, the dialog links the download page and the installers still work.
+Once the main menu has finished loading, the mod checks GitHub for a newer release and shows a dialog if there is one (turn it off with `CheckForUpdates` in the `[Updates]` section of the config). **Update Now** downloads the release DLL for your YARG channel (Stable or Nightly, baked into each build) and swaps it in for the installed plugin, and does the same for `YargMidiFix.dll` (installing it if it's missing; failing to get it doesn't stop the update); the new version is used after restarting YARG (the dialog offers **Quit YARG**). The running DLL can't be overwritten on Windows, but it can be renamed, so it's moved aside to `YargNetplay.dll.old` and deleted on the next launch (Linux and macOS take the same path). The same DLL runs on every OS, so the update works wherever the installer does. The download is checked (a valid assembly named YargNetplay with the release's version) before it replaces anything. If the update fails, the dialog links the download page and the installers still work.
 
 The mod's version is shown next to YARG's at the top left of the menu. Stable YARG hides that label, so there it shows just the two versions.
 
@@ -134,11 +140,11 @@ The mod's version is shown next to YARG's at the top left of the menu. Stable YA
 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request against the newest YARG stable and nightly releases, one DLL per channel.
 
-- Pushing a `v*` tag (for example `git tag v0.3.0 && git push origin v0.3.0`) builds with that version and publishes a GitHub release with `YargNetplay-Stable.dll`, `YargNetplay-Nightly.dll`, `YargNetplay-Installer.zip` and the install scripts. The installers and the update check use the latest release.
+- Pushing a `v*` tag (for example `git tag v0.3.0 && git push origin v0.3.0`) builds with that version and publishes a GitHub release with `YargNetplay-Stable.dll`, `YargNetplay-Nightly.dll`, `YargMidiFix.dll`, `YargNetplay-Installer.zip` and the install scripts. The installers and the update check use the latest release.
 - Every day the latest release's code is rebuilt against the newest YARG stable and nightly. If a new YARG changes the built DLL, the release's DLL for that channel is replaced. If it no longer builds, an issue labeled `yarg-compat` is opened, and closed again once it builds. Running the workflow by hand does the same check.
 - While the newest YARG of a channel needs porting work, set the repository variable `YARG_NIGHTLY_PIN` (or `YARG_STABLE_PIN`) to the YARG tag that works. Pushes and releases then build that channel against it; the daily check still tests the newest version.
 
-Release builds (`dotnet build -c Release`) put `YargNetplay.dll` and the installers in `dist\`.
+Release builds (`dotnet build -c Release`) put `YargNetplay.dll`, `YargMidiFix.dll` and the installers in `dist\`.
 
 ## Build
 
@@ -149,7 +155,7 @@ Requires the .NET SDK. By default the build references the YARG nightly install 
 dotnet build -c Release -p:YargDir="C:\path\to\YARG"
 ```
 
-If BepInEx is installed in that YARG folder, the build copies the plugin to `BepInEx\plugins\YargNetplay\` automatically.
+Building `YargNetplay.csproj` also builds the MIDI fix (`midifix\YargMidiFix.csproj`). Shared settings (version, `YargDir`) are in `Directory.Build.props`. If BepInEx is installed in that YARG folder, the build copies the plugins to `BepInEx\plugins\YargNetplay\` and `BepInEx\plugins\YargMidiFix\` automatically.
 
 ## Install BepInEx by hand (once per YARG install)
 

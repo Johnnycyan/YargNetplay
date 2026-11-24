@@ -1,24 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net472</TargetFramework>
+    <!-- Version, target framework, the game BCL setup and YargDir are in Directory.Build.props, shared with the MIDI fix.
+         Plugin.Version comes from $(Version) (BuildInfo.g.cs). -->
     <AssemblyName>YargNetplay</AssemblyName>
-    <!-- Plugin.Version comes from this (BuildInfo.g.cs). CI release builds override it from the tag: -p:Version=1.2.3 -->
-    <Version>0.2.0</Version>
     <RootNamespace>YargNetplay</RootNamespace>
-    <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Nullable>disable</Nullable>
-    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
-    <!-- Compile against the game's own Mono BCL (its mscorlib has Span<T>, which YARG.Core uses). -->
-    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
-    <NoStdLib>true</NoStdLib>
-    <RestoreAdditionalProjectSources>https://nuget.bepinex.dev/v3/index.json</RestoreAdditionalProjectSources>
-
-    <!-- YARG install to compile against (and deploy into, if BepInEx is installed there).
-         Override with: dotnet build -p:YargDir="C:\path\to\YARG" -->
-    <YargDir Condition="'$(YargDir)' == ''">$(LOCALAPPDATA)\YARC\YARG Installs\cd3bd653-c9f2-420e-a575-5a1ef115cdda\installation</YargDir>
-    <YargManaged>$(YargDir)\YARG_Data\Managed</YargManaged>
 
     <!-- Newer nightlies (b4161 on) play setlists through the static YARG.Playlists.Setlist instead of PersistentState's
          ShowSongs/ShowIndex (see src/Game/Show.cs). Detected from the game assembly; override with -p:YargStaticSetlist=true|false -->
@@ -38,6 +25,14 @@
 
   <ItemGroup>
     <PackageReference Include="BepInEx.Core" Version="5.4.21" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- The MIDI fix is its own plugin (midifix\), installed alongside this one. Building this project builds it too;
+       nothing here references it. -->
+  <ItemGroup>
+    <Compile Remove="midifix\**" />
+    <None Remove="midifix\**" />
+    <ProjectReference Include="midifix\YargMidiFix.csproj" ReferenceOutputAssembly="false" Private="false" />
   </ItemGroup>
 
   <ItemGroup>
@@ -78,8 +73,8 @@
     </ItemGroup>
   </Target>
 
-  <!-- Release builds also produce the release assets in dist\: YargNetplay.dll (what the installers download)
-       and YargNetplay-Installer.zip (the installers, which fetch the newest YargNetplay.dll from GitHub). -->
+  <!-- Release builds also produce the release assets in dist\: YargNetplay.dll and YargMidiFix.dll (what the installers
+       download) and YargNetplay-Installer.zip (the installers, which fetch the newest DLLs from GitHub). -->
   <Target Name="PackageRelease" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <PackageDir>$(BaseIntermediateOutputPath)package\</PackageDir>
@@ -88,7 +83,7 @@
     <MakeDir Directories="dist" />
     <Copy SourceFiles="installer\install.ps1;installer\Install YARG Netplay.bat;installer\install.sh" DestinationFolder="$(PackageDir)" />
     <ZipDirectory SourceDirectory="$(PackageDir)" DestinationFile="dist\YargNetplay-Installer.zip" Overwrite="true" />
-    <Copy SourceFiles="$(TargetPath);installer\install.ps1;installer\install.sh" DestinationFolder="dist" />
+    <Copy SourceFiles="$(TargetPath);midifix\bin\$(Configuration)\$(TargetFramework)\YargMidiFix.dll;installer\install.ps1;installer\install.sh" DestinationFolder="dist" />
   </Target>
 
 </Project>

@@ -13,7 +13,7 @@ dotnet build -c Release -p:YargDir="C:\path\to\YARG"  # against another YARG ins
 - The project compiles against the game's own assemblies in `$(YargDir)\YARG_Data\Managed` (including its Mono `mscorlib`). They aren't committed. The default `YargDir` is a nightly install under `%LOCALAPPDATA%\YARC\YARG Installs\`.
 - If `$(YargDir)\BepInEx\plugins` exists, every build copies the DLL there (`DeployToYarg`). Building against an install overwrites the plugin in it.
 - There are no unit tests. A build passing against each supported YARG is the minimum check; behavior is checked in-game (see Testing).
-- `<Version>` in the csproj is only the local default. Releases take the version from the tag.
+- `<Version>` in `Directory.Build.props` is only the local default. Releases take the version from the tag.
 
 ## Supporting several YARG versions
 
@@ -30,6 +30,7 @@ One source tree builds against YARG stable and nightly; CI builds one DLL per ch
 - `src/Net/`: TCP connection, wire protocol (`Protocol.cs`), session state and messages (`Session.cs`), song transfer, saved servers.
 - `src/Game/`: everything that touches YARG: Harmony hooks, the remote player (`RemoteDriver.cs`), setlist sync with YARG's own setlist (`NativeSetlist.cs`), following the peer through menus (`NativeMenus.cs`), part filtering, received songs (`.sng` packaging and in-memory library injection).
 - `src/UI/`: UI built from YARG's own prefabs at runtime (Online page, dialogs, toasts, setlist overlay) plus the F8 IMGUI debug window.
+- `midifix/`: YARG MIDI Fix, a separate small plugin built, released and installed with the mod (moves Minis' per-frame MIDI port check to a background thread). Shared build settings are in `Directory.Build.props`.
 - `installer/`: Windows (`install.ps1` + `.bat`) and Linux/macOS (`install.sh`, kept compatible with macOS's bash 3.2) installers. They download the release DLL for the YARG channel of each install.
 - `.github/workflows/build.yml`: CI builds, tag releases, and the daily compatibility check.
 
