@@ -101,6 +101,7 @@ namespace YargNetplay.Net
         public static Session Current { get; private set; }
 
         private const double PING_INTERVAL = 1.0;
+        private const double HELLO_TIMEOUT = 15.0;
         private const double START_LEAD_TIME = 0.75;
         private const int CLOCK_SAMPLES = 16;
         private const int RTT_HISTORY = 30;
@@ -501,6 +502,10 @@ namespace YargNetplay.Net
             foreach (var peer in _pending.ToList())
             {
                 Drain(peer.Conn);
+                // A real player says Hello right after connecting. Anything else (a port scanner that keeps the socket
+                // open) would hold a player id and a read thread for good.
+                if (!peer.Conn.IsClosed && _pending.Contains(peer) && LocalNow - peer.ConnectedAt > HELLO_TIMEOUT)
+                    peer.Conn.Close("No hello");
                 if (peer.Conn.IsClosed) _pending.Remove(peer);
             }
 

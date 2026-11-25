@@ -623,9 +623,11 @@ namespace YargNetplay.UI
             finally { _fetchingPublicIp = false; }
         }
 
-        private static void CopyLanAddress()
+        private void CopyLanAddress()
         {
-            string ip = HostAddress.GetLanIp();
+            // The address looked up in the background for the player list; the slow lookup only runs if that one
+            // isn't known yet.
+            string ip = LanIp ?? HostAddress.GetLanIp();
             if (ip == null) NetplayDialogs.ShowError("Couldn't find this PC's address on your local network.");
             else CopyToClipboard(JoinAddress(ip), "your LAN IP");
         }
