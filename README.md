@@ -17,7 +17,7 @@ Play [YARG](https://github.com/YARC-Official/YARG) online with friends, up to 8 
   ```
   Then start YARG from the new **YARG (Netplay)** shortcut (Linux) or app in `~/Applications` (macOS). The YARC Launcher's Play button starts YARG without the mod. macOS support hasn't been tested on a Mac yet.
 
-The installer finds the YARG versions you installed with the YARC Launcher, works for both Stable and Nightly, and installs everything the mod needs. When a new version of the mod comes out, YARG tells you on the main menu and can update it for you.
+The installer finds the YARG versions you installed with the YARC Launcher, works for both Stable and Nightly, and installs everything the mod needs. A YARG update from the launcher removes the mod, so the installer offers to reinstall it automatically after every update. When a new version of the mod comes out, YARG tells you on the main menu and can update it for you.
 
 Everyone needs the same YARG version and the same mod version.
 
@@ -132,6 +132,18 @@ The installer downloads the newest YARG Netplay release from GitHub, built for t
 - **macOS:** the installer finds YARC Launcher installs under `~/Library/Application Support/YARC`, installs BepInEx's universal macOS build next to `YARG.app`, and adds a "YARG (Netplay)" app to `~/Applications` that starts YARG through `run_bepinex.sh` (Apple Silicon runs natively). The YARC Launcher's Play button starts YARG without the mod. Not tested on a Mac yet.
 - **YARG.exe under Wine or Proton:** the Windows BepInEx is installed. Start YARG with `WINEDLLOVERRIDES="winhttp=n,b"`.
 
+Downloads are kept in the installer's data folder (`%LOCALAPPDATA%\YargNetplay` on Windows, `~/.local/share/YargNetplay` on Linux, `~/Library/Application Support/YargNetplay` on macOS). When GitHub can't be reached, the copy downloaded earlier is installed instead.
+
+### Auto-reinstall after YARG updates
+
+The YARC Launcher replaces the YARG folder on every update, which removes BepInEx and the mod. For launcher installs the installer asks once whether to reinstall them automatically (default yes). It saves the chosen install folders and a copy of the installer in its data folder; later runs add their installs to the list and refresh the copy. A reinstall waits until nothing under the install's `YARG Installs\<id>` folder has changed for 10 seconds, so the launcher has finished extracting, and only touches installs that have YARG but lost BepInEx or the mod. It downloads the newest release like a normal install. Changes under `BepInEx\` (the mod's own logs and config) don't trigger it.
+
+- **Windows:** a per-user scheduled task, *YARG Netplay auto-reinstall* (no admin rights needed), starts `install.ps1 -Watch` hidden at logon (through `conhost --headless`, so no window flashes). It watches the launcher's `YARG Installs` folder with a `FileSystemWatcher`, checks once at start and every 30 minutes in case it missed a change, and logs to `auto-reinstall.log` in the data folder. In testing, the mod was back about 10 seconds after the last file changed.
+- **Linux:** a systemd user path unit, `yarg-netplay-reinstall.path`, watches each install's `<id>` folder and its `tag.txt` and runs `install.sh --auto`. A timer also runs it a minute after login and every 30 minutes. It needs a systemd user session; without one the installer says it couldn't set this up.
+- **macOS:** a launchd agent, `io.github.johnnycyan.yargnetplay.reinstall`, does the same with `WatchPaths`, at login and every 30 minutes. It logs to `auto-reinstall.log` in the data folder. Not tested on a Mac yet.
+
+To turn it off, run `powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\YargNetplay\install.ps1" -RemoveAutoReinstall` (Windows) or `bash ~/.local/share/YargNetplay/install.sh --remove-auto-reinstall` (Linux; on macOS the script is in `~/Library/Application Support/YargNetplay`). This removes the task or units and the data folder. The mod stays installed until the next YARG update. If you open YARG in the few seconds between an update finishing and the reinstall, that launch runs without the mod.
+
 Once the main menu has finished loading, the mod checks GitHub for a newer release and shows a dialog if there is one (turn it off with `CheckForUpdates` in the `[Updates]` section of the config). **Update Now** downloads the release DLL for your YARG channel (Stable or Nightly, baked into each build) and swaps it in for the installed plugin, and does the same for `YargMidiFix.dll` (installing it if it's missing; failing to get it doesn't stop the update); the new version is used after restarting YARG (the dialog offers **Quit YARG**). The running DLL can't be overwritten on Windows, but it can be renamed, so it's moved aside to `YargNetplay.dll.old` and deleted on the next launch (Linux and macOS take the same path). The same DLL runs on every OS, so the update works wherever the installer does. The download is checked (a valid assembly named YargNetplay with the release's version) before it replaces anything. If the update fails, the dialog links the download page and the installers still work.
 
 The mod's version is shown next to YARG's at the top left of the menu. Stable YARG hides that label, so there it shows just the two versions.
@@ -164,7 +176,7 @@ Building `YargNetplay.csproj` also builds the MIDI fix (`midifix\YargMidiFix.csp
 3. Run YARG once so BepInEx creates its folders, then build this project (or copy `YargNetplay.dll` into `BepInEx\plugins\`).
 4. Optional: set `[Logging.Console] Enabled = true` in `BepInEx\config\BepInEx.cfg` to see logs.
 
-The YARC Launcher may remove extra files when it updates or verifies YARG. If so, reinstall BepInEx afterwards.
+The YARC Launcher may remove extra files when it updates or verifies YARG. If so, reinstall BepInEx afterwards (the installer's [auto-reinstall](#auto-reinstall-after-yarg-updates) does this for you).
 
 ## Test locally (two instances on one PC)
 
