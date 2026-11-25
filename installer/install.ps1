@@ -63,11 +63,15 @@ function Get-Channel($tag) {
 # launcher) or it isn't a known tag.
 function Get-FolderChannel($folder) {
     $tagFile = Join-Path (Split-Path $folder -Parent) 'tag.txt'
-    if (Test-Path $tagFile) { Get-Channel (Get-Content $tagFile -Raw).Trim() } else { $null }
+    # Get-Content returns $null for an empty file (the launcher creates tag.txt before writing it), hence the "$()".
+    if (Test-Path $tagFile) { Get-Channel "$(Get-Content $tagFile -Raw)".Trim() } else { $null }
 }
 
 # For a folder picked by hand: the launcher's tag.txt next to it if there is one, otherwise ask.
 function New-Target($folder) {
+    # Resolved against PowerShell's current folder ($PWD), which .NET's GetFullPath doesn't know about, so the
+    # auto-reinstall saves the same folder the install went into.
+    $folder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($folder)
     $channel = Get-FolderChannel $folder
     while (-not $channel) {
         $answer = Read-Host "Is $folder YARG Stable or Nightly? (S/N)"
@@ -223,9 +227,11 @@ function Get-WatchedFolders {
 # (the task's process is conhost, which only starts PowerShell), so they're found by command line.
 function Stop-Watcher {
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $TaskName }
-    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-        Where-Object { $_.CommandLine -like "*$ScriptCopy*-Watch*" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $ids = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+        Where-Object { $_.CommandLine -like "*$ScriptCopy*-Watch*" } | ForEach-Object { $_.ProcessId })
+    foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+    # Stop-Process doesn't wait. A watcher started while the old one still holds the mutex would see it taken and quit.
+    if ($ids) { Wait-Process -Id $ids -Timeout 10 -ErrorAction SilentlyContinue }
 }
 
 function Enable-AutoReinstall($targets) {
@@ -238,11 +244,19 @@ function Enable-AutoReinstall($targets) {
     Set-Content -Path $WatchList -Value $folders
 
     # The watcher runs from its own copy of this script, refreshed on every install so it matches the installed mod.
+    # The new copy is fetched before the running watcher is stopped, so a failed download leaves the old setup
+    # working instead of a stopped watcher and a half-written script.
+    $newCopy = $null
+    if (-not $PSCommandPath) {
+        $newCopy = "$ScriptCopy.new"
+        try { Invoke-WebRequest -Uri $ScriptUrl -OutFile $newCopy -UseBasicParsing }
+        catch { Remove-Item $newCopy -Force -ErrorAction SilentlyContinue; throw }
+    }
     Stop-Watcher
-    if ($PSCommandPath) {
-        if ([IO.Path]::GetFullPath($PSCommandPath) -ne $ScriptCopy) { Copy-Item $PSCommandPath $ScriptCopy -Force }
-    } else {
-        Invoke-WebRequest -Uri $ScriptUrl -OutFile $ScriptCopy -UseBasicParsing
+    if ($newCopy) {
+        Move-Item $newCopy $ScriptCopy -Force
+    } elseif ([IO.Path]::GetFullPath($PSCommandPath) -ne $ScriptCopy) {
+        Copy-Item $PSCommandPath $ScriptCopy -Force
     }
 
     # A per-user logon task needs no admin rights. conhost --headless runs PowerShell without a console window
@@ -295,7 +309,9 @@ function Start-Watching {
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     # Only one watcher at a time, however it was started.
     $mutex = New-Object Threading.Mutex($false, 'Local\YargNetplayAutoReinstall')
-    if (-not $mutex.WaitOne(0)) { return }
+    # A watcher killed while another process had the mutex open leaves it abandoned: WaitOne then throws, but the
+    # mutex is ours.
+    try { if (-not $mutex.WaitOne(0)) { return } } catch [Threading.AbandonedMutexException] { }
 
     # Keep the log short.
     if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt 256KB) {
@@ -324,7 +340,7 @@ function Start-Watching {
     # check catches anything the watcher missed (an overflowing buffer, an install folder that didn't exist yet).
     $quiet = [TimeSpan]::FromSeconds(10)
     $fallback = [TimeSpan]::FromMinutes(30)
-    Invoke-Reinstall
+    try { Invoke-Reinstall } catch { try { Write-Log "  Check failed: $($_.Exception.Message)" } catch { } }
     $lastCheck = Get-Date
     $pendingSince = $null
     while ($true) {
@@ -339,9 +355,12 @@ function Start-Watching {
             }
         }
         $now = Get-Date
-        if (($pendingSince -and $now - $pendingSince -ge $quiet) -or $now - $lastCheck -ge $fallback) {
+        # The periodic check waits too while changes are pending, so it never installs into a half-extracted folder.
+        if ($pendingSince) { $due = $now - $pendingSince -ge $quiet } else { $due = $now - $lastCheck -ge $fallback }
+        if ($due) {
             $pendingSince = $null
-            Invoke-Reinstall
+            # An error here (a file the launcher is still writing, a locked log) must not end the watcher.
+            try { Invoke-Reinstall } catch { try { Write-Log "  Check failed: $($_.Exception.Message)" } catch { } }
             $lastCheck = Get-Date
         }
     }

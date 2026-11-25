@@ -252,7 +252,10 @@ namespace YargNetplay.Net
             var data = r.ReadBytes(count);
 
             string key = Key(hash);
-            if (!_incoming.TryGetValue(key, out var incoming) || incoming.From != from || offset != incoming.Stream.Position)
+            // The rest of a transfer this side already gave up on: the sender doesn't know and keeps sending. Failing
+            // again for every chunk would flood the log and mark a retry that's already under way as failed.
+            if (!_incoming.TryGetValue(key, out var incoming)) return;
+            if (incoming.From != from || offset != incoming.Stream.Position || offset + data.Length > incoming.Length)
             {
                 Fail(hash, "Transfer out of order");
                 CloseIncoming(key, deletePartial: true);

@@ -81,8 +81,19 @@ namespace YargMidiFix
             // The handle lives as long as the process: this is a background thread that only ends when the game quits.
             while (true)
             {
-                uint count = rtmidi_get_port_count(handle);
-                _portCount = IsOk(handle) ? (int) count : -1;
+                // A throw here would end the thread with the last count still set, and Minis would never see a
+                // device plugged in again. Fall back to Minis' own check instead.
+                try
+                {
+                    uint count = rtmidi_get_port_count(handle);
+                    _portCount = IsOk(handle) ? (int) count : -1;
+                }
+                catch (Exception e)
+                {
+                    _portCount = -1;
+                    _log.LogWarning($"MIDI port watch stopped, Minis checks every frame again: {e.Message}");
+                    return;
+                }
                 Thread.Sleep(PollIntervalMs);
             }
         }

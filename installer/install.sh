@@ -354,7 +354,9 @@ enable_auto() { # launcher folders to add
     if [ -n "$src" ] && [ -f "$src" ]; then
         [ "$(cd "$(dirname "$src")" && pwd)/$(basename "$src")" = "$SCRIPT_COPY" ] || cp -f "$src" "$SCRIPT_COPY"
     else
-        download "$SCRIPT_URL" "$SCRIPT_COPY" || return 1
+        # Into a temp file first, so a failed download doesn't leave a half-written script for the running setup.
+        download "$SCRIPT_URL" "$SCRIPT_COPY.new" && mv -f "$SCRIPT_COPY.new" "$SCRIPT_COPY" ||
+            { rm -f "$SCRIPT_COPY.new"; return 1; }
     fi
 
     # It's started when the launcher changes the folder holding an install ("YARG Installs/<id>", which gets a new
@@ -455,21 +457,29 @@ run_auto() {
         busy=""
         for dir in "${folders[@]}"; do
             [ -d "$(dirname "$dir")" ] || continue
-            busy="$(find "$(dirname "$dir")" -path '*/BepInEx' -prune -o -newer "$stamp" -print 2>/dev/null | head -n 1)"
+            # -quit instead of "| head": with pipefail, find killed by SIGPIPE would fail the line and end the script.
+            # "|| true" because find also exits non-zero on files it can't read.
+            busy="$(find "$(dirname "$dir")" -path '*/BepInEx' -prune -o -newer "$stamp" -print -quit 2>/dev/null || true)"
             [ -z "$busy" ] || break
         done
         [ -n "$busy" ] || break
         tries=$((tries + 1))
     done
 
-    local channel
+    local channel status
     for dir in "${folders[@]}"; do
         [ "$(game_kind "$dir")" != none ] || continue
         mod_installed "$dir" && continue
         channel="$(tag_channel "$dir")"
         if [ -z "$channel" ]; then echo "Skipping $dir (no Stable or Nightly tag.txt next to it)."; continue; fi
         echo "$(date '+%Y-%m-%d %H:%M:%S') Reinstalling into $dir"
-        install_into "$dir" "$channel"
+        # In a subshell so a failure (fail, or set -e) only skips this install. Not "( ... ) || ...": set -e is ignored
+        # inside a command whose status is tested.
+        set +e
+        (set -e; install_into "$dir" "$channel")
+        status=$?
+        set -e
+        [ "$status" = 0 ] || echo "  Failed to reinstall into $dir."
     done
 }
 

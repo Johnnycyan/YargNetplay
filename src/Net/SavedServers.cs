@@ -94,7 +94,8 @@ namespace YargNetplay.Net
                 int end = text.IndexOf(']');
                 if (end < 0) return false;
                 host = text.Substring(1, end - 1);
-                return end + 1 >= text.Length || (text[end + 1] == ':' && int.TryParse(text.Substring(end + 2), out port));
+                return end + 1 >= text.Length
+                    || (text[end + 1] == ':' && int.TryParse(text.Substring(end + 2), out port) && port is > 0 and < 65536);
             }
 
             int colon = text.LastIndexOf(':');
